@@ -1,0 +1,12 @@
+venv
+.env
+pdfs
+media
+media
+media
+**/__pycache__/
+
+db.sqlite3
+
+pdfmap_project/static
+static
