@@ -345,6 +345,7 @@ def workspace_page_polygons(request, workspace_id, page_id):
             payload: [ {id?, polygon_id, vertices: [...]}, ... ]
             NOTE: 'page' is NOT required here; the URL scopes it.
     """
+
     # 1) Ownership / scope checks
     ws = _get_workspace_for_user_or_404(request.user, workspace_id)
     try:
