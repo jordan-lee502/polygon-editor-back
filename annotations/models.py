@@ -13,6 +13,8 @@ class Polygon(models.Model):
     total_vertices = models.PositiveIntegerField()
     vertices = models.JSONField()  # List of [x, y] pairs
 
+    visible = models.BooleanField(default=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     synced_at  = models.DateTimeField(null=True, blank=True)
@@ -46,7 +48,7 @@ class Polygon(models.Model):
         xs = [point[0] for point in self.vertices]
         ys = [point[1] for point in self.vertices]
         return [min(xs), min(ys), max(xs), max(ys)]
-    
+
     @property
     def area_percentage(self):
         return 0
@@ -59,7 +61,7 @@ class Polygon(models.Model):
         pixel_area = self.area
         inch_area = pixel_area / (dpi * dpi)
         return round(inch_area, 4)
-    
+
     @property
     def size_category(self):
         if not self.area:
@@ -70,7 +72,7 @@ class Polygon(models.Model):
             return "medium"
         else:
             return "large"
-        
+
     @property
     def needs_sync(self) -> bool:
         # True if never synced, or changes after last sync
