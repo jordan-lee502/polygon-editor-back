@@ -7,26 +7,74 @@ from workspace.models import Workspace, PageImage, SyncStatus
 from annotations.models import Polygon
 from .api_client_tto import TTOApi
 import uuid
-
-
-def _needs_sync_qs(model):
-    return model.objects.filter(
-        Q(synced_at__isnull=True) | Q(updated_at__gt=F("synced_at"))
-    )
+from utils.urls import to_absolute_media_url
+from typing import Dict, Optional, Mapping, Any
 
 
 def _page_payload_from_model(pg: PageImage) -> Dict:
     return {
         "page_nb": getattr(pg, "page_number", 0),
-        "picture_link": getattr(pg, "picture_link", "") or "",
-        "scale": getattr(pg, "scale", "") or "",
-        "unit": getattr(pg, "unit", "") or "",
-        "image_height": getattr(pg, "image_height", 0) or 0,
-        "image_width": getattr(pg, "image_width", 0) or 0,
-        "pdf_height": getattr(pg, "pdf_height", 0) or 0,
-        "pdf_width": getattr(pg, "pdf_width", 0) or 0,
+        "picture_link": to_absolute_media_url(getattr(pg, "image", "")),
+        "scale": getattr(pg, "scale_ratio", "") or "",
+        "unit": getattr(pg, "scale_unit", "") or "",
+        "image_height": getattr(pg, "height", 0) or 0,
+        "image_width": getattr(pg, "width", 0) or 0,
+        "pdf_height": getattr(pg, "height", 0) or 0,
+        "pdf_width": getattr(pg, "width", 0) or 0,
         "json_str": getattr(pg, "json", "") or "",
-        "confirmed_scale": getattr(pg, "confirmed_scale", None),
+        "confirmed_scale": (getattr(pg, "scale_ratio", None) is not None),
+    }
+
+
+def _workspace_payload_for_create(
+    ws,
+    *,
+    project_name_field: str = "name",
+    project_file_link_field: Optional[str] = None,
+) -> Dict[str, str]:
+    """
+    Build the payload expected by TTOApi.create_project(project_name, file_link).
+    Converts any file/image reference to an absolute URL using storage/BASE_URL.
+    """
+    project_name = str(getattr(ws, project_name_field, "") or "")
+
+    file_link = ""
+    if project_file_link_field:
+        raw = getattr(ws, project_file_link_field, "") or ""
+        # Works with FieldFile or str path (e.g., 'fullpages/workspace_19/..png')
+        file_link = to_absolute_media_url(raw)
+
+    return {
+        "project_name": project_name,
+        "file_link": file_link,
+    }
+
+
+def _workspace_payload_for_update(
+    ws,
+    *,
+    project_name_field: str = "name",
+    project_status_field: Optional[str] = None,
+    status_map: Optional[Mapping[Any, str]] = None,
+) -> Dict[str, str]:
+    """
+    Build the payload expected by TTOApi.update_project(project_id, project_name, project_status).
+    - project_name: from workspace field (default 'name')
+    - project_status: optional; will stringify or map via `status_map` if provided.
+    """
+    project_name = str(getattr(ws, project_name_field, "") or "")
+
+    project_status = ""
+    if project_status_field:
+        raw = getattr(ws, project_status_field, None)
+        if status_map and raw in status_map:
+            project_status = status_map[raw]
+        else:
+            project_status = "" if raw is None else str(raw)
+
+    return {
+        "project_name": project_name,
+        "project_status": project_status,
     }
 
 
@@ -50,9 +98,6 @@ def sync_workspace_tree_tto(
         if verbose:
             print(msg)
 
-    # ---------- START ONLY IF PENDING (atomic claim) ----------
-    token = uuid.uuid4()
-    now = timezone.now()
     claimed = Workspace.objects.filter(pk=workspace_id).filter(
         ~Q(sync_status=SyncStatus.PROCESSING)
     )
@@ -136,14 +181,25 @@ def sync_workspace_tree_tto(
                 _bind_sync(ws, int(match["project_id"]))
                 log(f"[Project] Bound to existing project_id={ws.sync_id}")
             else:
-                new_id = api.create_project(ws_name, file_link=file_link or "")
+                create_payload = _workspace_payload_for_create(
+                    ws,
+                    project_name_field="name",
+                    project_file_link_field="uploaded_pdf",  # or 'pdf', 'image', etc. (optional)
+                )
+                new_id = api.create_project(**create_payload)
                 _bind_sync(ws, new_id)
                 log(f"[Project] Created project_id={ws.sync_id}")
         else:
             log(f"[Project] Already bound: project_id={ws.sync_id}")
 
         if need_project_update:
-            api.update_project(ws.sync_id, project_name=ws_name)
+            update_payload = _workspace_payload_for_update(
+                ws,
+                project_name_field="name",
+                project_status_field=None,
+                status_map={True: "Active", False: "Inactive"}
+            )
+            api.update_project(ws.sync_id, **update_payload)
             Workspace.objects.filter(pk=ws.pk).update(synced_at=timezone.now())
             log(
                 f"[Project] Updated remote project metadata for project_id={ws.sync_id}"

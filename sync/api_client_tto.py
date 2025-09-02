@@ -128,6 +128,7 @@ class TTOApi:
             "created_by": self.actor_email,
             "auth_code": self.auth_code,
         }
+        print(payload)
         data = self._post(TTO_URLS["create_page"], payload)
         return int(data["new_id"])
 
@@ -137,8 +138,8 @@ class TTOApi:
         page_id: int,
         page_nb: Optional[int] = None,
         picture_link: Optional[str] = None,
-        scale: Optional[str] = None,
-        confirmed_scale: Optional[str] = None,
+        scale: Optional[float] = None,
+        confirmed_scale: Optional[bool] = None,
         unit: Optional[str] = None,
         image_height: Optional[int] = None,
         image_width: Optional[int] = None,
@@ -150,8 +151,8 @@ class TTOApi:
             "page_id": int(page_id),
             "page_nb": int(page_nb) if page_nb is not None else None,
             "picture_link": picture_link if picture_link is not None else "",
-            "scale": scale if scale is not None else "",
-            "confirmed_scale": confirmed_scale if confirmed_scale is not None else "",
+            "scale": f"{scale}",
+            "confirmed_scale": "Yes" if bool(confirmed_scale) else "No",
             "unit": unit if unit is not None else "",
             "image_height": int(image_height) if image_height is not None else 0,
             "image_width": int(image_width) if image_width is not None else 0,

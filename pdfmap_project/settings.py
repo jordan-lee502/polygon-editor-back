@@ -200,3 +200,35 @@ SECURE_SSL_REDIRECT = not DEBUG
 SESSION_COOKIE_SECURE = not DEBUG
 CSRF_COOKIE_SECURE = not DEBUG
 
+CELERY_BROKER_URL = config("CELERY_BROKER_URL", "redis://localhost:6379/0")
+CELERY_RESULT_BACKEND = config("CELERY_RESULT_BACKEND", CELERY_BROKER_URL)
+
+# Safety & behavior
+CELERY_TASK_ACKS_LATE = True
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+CELERY_TASK_TIME_LIMIT = 60 * 15  # 15 minutes
+
+# Optional: run tasks locally (synchronous) for dev/debug
+# Set CELERY_TASK_ALWAYS_EAGER=true in your env to enable
+CELERY_TASK_ALWAYS_EAGER = config("CELERY_TASK_ALWAYS_EAGER", "false").lower() == "true"
+CELERY_TASK_EAGER_PROPAGATES = True
+
+# Queue names
+CELERY_SYNC_QUEUE = config("CELERY_SYNC_QUEUE", "sync")
+
+# Beat schedule for periodic dispatching (every 5 minutes)
+from celery.schedules import crontab  # noqa: E402
+
+CELERY_BEAT_SCHEDULE = {
+    "dispatch-pending-workspace-syncs-every-5-min": {
+        "task": "sync.dispatch_all_pending_workspace_syncs",
+        # Either "schedule": 300.0,  # every 300 seconds
+        "schedule": 300.0,
+        "options": {"queue": CELERY_SYNC_QUEUE},
+    },
+}
+
+BASE_URL = config("BASE_URL", "http://localhost:8000")
+
+CELERY_PROCESS_QUEUE = os.getenv("CELERY_PROCESS_QUEUE", "process")
+PROCESSING_LOCK_TTL = int(os.getenv("PROCESSING_LOCK_TTL", "900"))  # 15m

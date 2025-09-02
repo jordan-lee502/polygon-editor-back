@@ -4,13 +4,11 @@ from typing import Optional
 
 from django.conf import settings
 from django.db.models import Q, F, Exists, OuterRef
-from django.utils import timezone
 import logging
 
 from workspace.models import Workspace, PageImage
 from annotations.models import Polygon
-from .api_client_tto import TTOApi
-from .service_tto import sync_workspace_tree_tto
+from sync.tasks import sync_workspace_tree_tto_task
 
 log = logging.getLogger(__name__)
 
@@ -103,23 +101,11 @@ def process_pending_sync_workspaces(batch_size: int = 10, verbose: bool = False)
             continue
 
         try:
-            api = TTOApi(
-                auth_code=auth_code,
-                user_email=(user_email or "").strip().lower(),
-                actor_email=(actor_email or user_email or "").strip().lower(),
-            )
             if verbose:
                 print(f"\n[TTO Sync] Processing workspace #{ws.pk}")
             log.info("TTO: syncing workspace %s", ws.pk)
 
-            # Run the actual sync (it already short-circuits if nothing needs doing)
-            sync_workspace_tree_tto(
-                workspace_id=ws.pk,
-                api=api,
-                project_name_field="name",
-                project_file_link_field=None,
-                verbose=verbose,
-            )
+            sync_workspace_tree_tto_task.delay(workspace_id=ws.id)
 
         except Exception as e:
             log.exception("TTO: sync failed for workspace %s: %s", ws.pk, e)

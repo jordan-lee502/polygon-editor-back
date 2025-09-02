@@ -1,3 +1,5 @@
+# processing/pdf_processor.py
+
 import os
 from io import BytesIO
 from typing import Optional
@@ -18,7 +20,6 @@ from workspace.models import (
     ProjectStatus,
 )
 from annotations.models import Polygon
-
 
 # ----------------------------- helpers -----------------------------
 
@@ -236,6 +237,7 @@ def process_workspace(ws: Workspace, *, max_zoom: int = 6) -> None:
 
         # Done
         mark_succeeded(ws)
+
         print(f"Workspace {ws.id} processed successfully.")
 
     except Exception as e:

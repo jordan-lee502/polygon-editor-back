@@ -10,3 +10,13 @@ db.sqlite3
 
 pdfmap_project/static
 static
+
+# Celery Beat persistent schedule & pid
+celerybeat-schedule
+celerybeat-schedule.*
+celerybeat.pid
+
+# If you store them in a run/ dir (recommended)
+run/celerybeat-schedule
+run/celerybeat-schedule.*
+run/celerybeat.pid

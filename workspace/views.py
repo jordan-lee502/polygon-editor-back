@@ -27,6 +27,9 @@ from workspace.services.scale_bar_processor import LineStatus
 from workspace.services.scale_bar_service import ScaleBarService, ScaleRequest
 
 from uuid import uuid4
+from processing.tasks import process_workspace_task
+from sync.tasks import sync_workspace_tree_tto_task
+from django.utils import timezone
 
 # ---------- helpers ----------
 
@@ -193,6 +196,8 @@ def list_workspaces(request):
             ws.default_scale_unit = unit
         ws.save()
 
+    process_workspace_task.delay(workspace_id=ws.id)
+
     return Response(WorkspaceSerializer(ws).data, status=status.HTTP_201_CREATED)
 
 
@@ -333,6 +338,9 @@ def workspace_polygons(request, workspace_id):
 
     final_polygons = Polygon.objects.filter(workspace_id=ws.id)
     serializer = PolygonSerializer(final_polygons, many=True)
+
+    sync_workspace_tree_tto_task.delay(workspace_id=ws.id)
+
     return Response(serializer.data, status=status.HTTP_200_OK)
 
 
@@ -380,6 +388,7 @@ def workspace_page_polygons(request, workspace_id, page_id):
     to_update = []
     to_create = []
     errors = []
+    now = timezone.now()
 
     with transaction.atomic():
         # --- Updates (only those on this page)
@@ -395,11 +404,12 @@ def workspace_page_polygons(request, workspace_id, page_id):
                 poly.polygon_id = incoming.get("polygon_id", poly.polygon_id)
                 poly.vertices = verts
                 poly.total_vertices = len(verts)
+                poly.updated_at = now
                 to_update.append(poly)
 
         if to_update:
             Polygon.objects.bulk_update(
-                to_update, ["polygon_id", "vertices", "total_vertices"]
+                to_update, ["polygon_id", "vertices", "total_vertices", "updated_at"]
             )
 
         # --- Creates (new polygons for this page)
@@ -410,15 +420,15 @@ def workspace_page_polygons(request, workspace_id, page_id):
             if not isinstance(verts, (list, tuple)):
                 errors.append("Invalid or missing 'vertices' for a new polygon.")
                 continue
-            to_create.append(
-                Polygon(
-                    workspace_id=ws.id,
-                    page=page_obj,
-                    polygon_id=item.get("polygon_id"),
-                    vertices=verts,
-                    total_vertices=len(verts),
-                )
+            p = Polygon(
+                workspace_id=ws.id,
+                page=page_obj,
+                polygon_id=item.get("polygon_id"),
+                vertices=verts,
+                total_vertices=len(verts),
             )
+            p.updated_at = now
+            to_create.append(p)
 
         if to_create:
             Polygon.objects.bulk_create(to_create)
@@ -435,6 +445,8 @@ def workspace_page_polygons(request, workspace_id, page_id):
 
     # Return fresh list for the page
     final_polys = Polygon.objects.filter(workspace_id=ws.id, page_id=page_obj.id)
+    sync_workspace_tree_tto_task.delay(workspace_id=ws.id)
+
     return Response(
         PolygonSerializer(final_polys, many=True).data, status=status.HTTP_200_OK
     )
@@ -790,8 +802,10 @@ def patch_page_scale(request, page_id: int):
 
     # Save atomically + any downstream recompute
     with transaction.atomic():
-        page.save(update_fields=sorted(set(update_fields)))
-        page.workspace.recompute_project_status()
+        page.updated_at = timezone.now()
+        fields = set(update_fields)
+        fields.add("updated_at")
+        page.save(update_fields=sorted(fields))
 
     # Serialize (pass request for absolute/derived URLs if your serializer uses it)
     page_json = PageImageSerializer(page, context={"request": request}).data
