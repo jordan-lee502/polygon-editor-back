@@ -6,4 +6,4 @@ class PolygonSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Polygon
-        fields = ['id', 'polygon_id', 'page_number', 'vertices', 'visible']
+        fields = ['id', 'polygon_id', 'page_number', 'vertices', 'visible', 'name']

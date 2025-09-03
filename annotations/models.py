@@ -10,6 +10,7 @@ class Polygon(models.Model):
         PageImage, on_delete=models.CASCADE, related_name="polygons"
     )
     polygon_id = models.PositiveIntegerField()
+    name = models.CharField(max_length=255, null=True, blank=True)
     total_vertices = models.PositiveIntegerField()
     vertices = models.JSONField()  # List of [x, y] pairs
 
@@ -22,7 +23,8 @@ class Polygon(models.Model):
     sync_id = models.IntegerField(null=True, blank=True)
 
     def __str__(self):
-        return f"Polygon {self.polygon_id} on Page {self.page.page_number}"
+        name_part = f" ({self.name})" if self.name else ""
+        return f"Polygon {self.polygon_id}{name_part} on Page {self.page.page_number}"
 
     @property
     def area(self):
