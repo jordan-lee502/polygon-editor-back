@@ -15,6 +15,11 @@ urlpatterns = [
         name="workspace_polygons",
     ),
     path(
+        "workspaces/<int:workspace_id>/pages/<int:page_id>/polygons/create/",
+        views.create_single_polygon,
+        name="create-single-polygon",
+    ),
+    path(
         "workspaces/<int:workspace_id>/pages/<int:page_id>/polygons/",
         views.workspace_page_polygons,
         name="workspace-page-polygons",

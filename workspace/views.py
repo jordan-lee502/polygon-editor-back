@@ -253,8 +253,11 @@ def workspace_pages(request, workspace_id):
 @api_view(["GET", "POST"])
 @permission_classes([IsAuthenticated])
 def workspace_polygons(request, workspace_id):
+
+    print("workspace_polygons")
     # Ownership check
-    ws = _get_workspace_for_user_or_404(request.user, workspace_id)
+    # ws = _get_workspace_for_user_or_404(request.user, workspace_id)
+
 
     if request.method == "GET":
         polygons = Polygon.objects.filter(workspace_id=ws.id).select_related("page")
@@ -1001,3 +1004,71 @@ def analyze_page_scale(request, page_id: int):
     }
     http_code = status_map.get(payload["status"], status.HTTP_200_OK)
     return Response(payload, status=http_code)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def create_single_polygon(request, workspace_id, page_id):
+    """
+    Create a single polygon without affecting existing polygons.
+    This is used when drawing a new polygon.
+    """
+    # Ownership check
+    ws = _get_workspace_for_user_or_404(request.user, workspace_id)
+
+    try:
+        page_obj = PageImage.objects.get(workspace_id=ws.id, id=page_id)
+    except ObjectDoesNotExist:
+        return Response(
+            {"detail": f"Page {page_id} not found for workspace {ws.id}"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    data = request.data
+    if not isinstance(data, dict):
+        return Response(
+            {"detail": "Expected a single polygon object."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Validate required fields
+    required_fields = ["polygon_id", "vertices"]
+    for field in required_fields:
+        if field not in data:
+            return Response(
+                {"detail": f"Missing required field: {field}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    try:
+        # Generate polygon_id if not provided
+        polygon_id = data.get("polygon_id")
+        if polygon_id is None:
+            import time
+            import random
+            polygon_id = int(time.time()) + random.randint(1000, 9999)
+
+        polygon = Polygon.objects.create(
+            workspace_id=ws.id,
+            page=page_obj,
+            polygon_id=polygon_id,
+            vertices=data["vertices"],
+            total_vertices=len(data["vertices"]),
+            name=data.get("name"),
+            visible=data.get("visible", True),
+        )
+
+        # Queue sync task (with error handling)
+        try:
+            sync_workspace_tree_tto_task.delay(workspace_id=ws.id)
+        except Exception as e:
+            print(f"Warning: Failed to queue sync task: {str(e)}")
+
+        serializer = PolygonSerializer(polygon)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    except Exception as e:
+        return Response(
+            {"detail": f"Failed to create polygon: {str(e)}"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
