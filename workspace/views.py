@@ -28,7 +28,7 @@ from workspace.services.scale_bar_service import ScaleBarService, ScaleRequest
 
 from uuid import uuid4
 from processing.tasks import process_workspace_task
-from sync.tasks import sync_workspace_tree_tto_task
+from sync.tasks import sync_workspace_tree_tto_task, sync_updated_pages_and_polygons_tto_task
 from django.utils import timezone
 
 # ---------- helpers ----------
@@ -342,7 +342,7 @@ def workspace_polygons(request, workspace_id):
     final_polygons = Polygon.objects.filter(workspace_id=ws.id)
     serializer = PolygonSerializer(final_polygons, many=True)
 
-    sync_workspace_tree_tto_task.delay(workspace_id=ws.id)
+    sync_updated_pages_and_polygons_tto_task.delay(workspace_id=ws.id)
 
     return Response(serializer.data, status=status.HTTP_200_OK)
 
@@ -448,7 +448,7 @@ def workspace_page_polygons(request, workspace_id, page_id):
 
     # Return fresh list for the page
     final_polys = Polygon.objects.filter(workspace_id=ws.id, page_id=page_obj.id)
-    sync_workspace_tree_tto_task.delay(workspace_id=ws.id)
+    sync_updated_pages_and_polygons_tto_task.delay(workspace_id=ws.id)
 
     return Response(
         PolygonSerializer(final_polys, many=True).data, status=status.HTTP_200_OK
@@ -1060,7 +1060,7 @@ def create_single_polygon(request, workspace_id, page_id):
 
         # Queue sync task (with error handling)
         try:
-            sync_workspace_tree_tto_task.delay(workspace_id=ws.id)
+            sync_updated_pages_and_polygons_tto_task.delay(workspace_id=ws.id)
         except Exception as e:
             print(f"Warning: Failed to queue sync task: {str(e)}")
 

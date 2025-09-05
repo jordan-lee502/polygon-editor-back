@@ -2,7 +2,7 @@
 
 from django.core.management.base import BaseCommand
 from workspace.models import Workspace
-from sync.tasks import sync_workspace_tree_tto_task
+from sync.tasks import sync_workspace_tree_tto_task, sync_updated_pages_and_polygons_tto_task
 
 
 class Command(BaseCommand):
@@ -28,6 +28,6 @@ class Command(BaseCommand):
     def handle(self, *args, **opts):
         ws = Workspace.objects.get(pk=opts["workspace_id"])
 
-        sync_workspace_tree_tto_task.delay(workspace_id=ws.id)
+        sync_updated_pages_and_polygons_tto_task.delay(workspace_id=ws.id)
 
         self.stdout.write(self.style.SUCCESS("TTO sync completed."))

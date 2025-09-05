@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from django.core.management.base import BaseCommand, CommandParser
 
-from sync.tasks import sync_workspace_tree_tto_task
+from sync.tasks import sync_workspace_tree_tto_task, sync_updated_pages_and_polygons_tto_task
 
 
 class Command(BaseCommand):
@@ -20,7 +20,7 @@ class Command(BaseCommand):
     def handle(self, *args, **opts):
         workspace_id = opts["workspace_id"]
         self.stdout.write(self.style.SUCCESS(f"Enqueuing TTO sync for workspace_id={workspace_id}"))
-        sync_workspace_tree_tto_task.delay(
+        sync_updated_pages_and_polygons_tto_task.delay(
             workspace_id=workspace_id,
             project_name_field=opts["project_name_field"],
             project_file_link_field=opts["project_file_link_field"],

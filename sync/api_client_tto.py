@@ -19,6 +19,7 @@ TTO_URLS = {
     "create_polygon": "https://prod-122.westeurope.logic.azure.com:443/workflows/47683654c87f4cb580296236bcd0b538/triggers/manual/paths/invoke?api-version=2016-06-01&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=YSQRcK9d-6jnZyW756qgquDEn3-O8oYoLwG--D5hqE4",
     "update_polygon": "https://prod-107.westeurope.logic.azure.com:443/workflows/bcba09ce225148f39480b448113fc527/triggers/manual/paths/invoke?api-version=2016-06-01&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=TP92kBPy3saR1IwVCelQ8EP61GXT3hrCxys70k1eMr8",
     "list_polygons_for_page": "https://prod-23.westeurope.logic.azure.com:443/workflows/e96909c0f88c485bb506cc0580545ae7/triggers/manual/paths/invoke?api-version=2016-06-01&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=6fIe1lfGdPzufok-E6x6o3q334s8zDcBnNygfBGk8M4",
+    "delete_polygon": "https://6a3cb7afb65948e28f25121cd9bace.bd.environment.api.powerplatform.com/powerautomate/automations/direct/workflows/799c43d162d947b692829904e3b8765b/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=Qr6n-4en16kYPhrxMzYmyXqiv82abTe8_a-nMPflqdA",
     # optional bulk test endpoint
     "bulk_update_polygons": "https://prod-252.westeurope.logic.azure.com:443/workflows/426b3fabf5b7411c80c9be7260921987/triggers/manual/paths/invoke?api-version=2016-06-01&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=IKKLlx4O9Q27u8YXo9Ux35ngA3Z3-0grgCkrbtqeF5I",
     # auth endpoints (if you need them)
@@ -244,6 +245,36 @@ class TTOApi:
             "auth_code": self.auth_code,
         }
         self._post(TTO_URLS["update_polygon"], payload)
+
+    def delete_polygon(self, polygon_id: int, project_id: int, page_id: int, poly_id: str) -> None:
+        """
+        Delete a polygon from TTO by its remote polygon_id.
+        Uses the bulk delete API that accepts an array of polygons.
+        """
+        payload = {
+            "auth_code": self.auth_code,
+            "deleted_by": self.actor_email,
+            "polygon_array": [
+                {
+                    "polygon_id": int(polygon_id),
+                    "project_id": int(project_id),
+                    "page_id": int(page_id),
+                    "poly_id": str(poly_id)
+                }
+            ]
+        }
+        self._post(TTO_URLS["delete_polygon"], payload)
+
+    def bulk_delete_polygons(self, polygon_array: List[Dict[str, Any]]) -> None:
+        """
+        Delete multiple polygons from TTO using the bulk delete API.
+        """
+        payload = {
+            "auth_code": self.auth_code,
+            "deleted_by": self.actor_email,
+            "polygon_array": polygon_array
+        }
+        self._post(TTO_URLS["delete_polygon"], payload)
 
     def bulk_update_polygons(self, polygon_array: List[Dict[str, Any]]) -> None:
         # polygon_array items must match the test schema you pasted

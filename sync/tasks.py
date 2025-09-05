@@ -16,7 +16,7 @@ except Exception:  # pragma: no cover
     from workspaces.models import Workspace  # type: ignore
 
 # Your existing service & API client
-from sync.service_tto import sync_workspace_tree_tto
+from sync.service_tto import sync_workspace_tree_tto, sync_updated_pages_and_polygons_tto
 from sync.api_client_tto import TTOApi
 
 
@@ -96,6 +96,63 @@ def sync_workspace_tree_tto_task(
 
 
 @shared_task(
+    bind=True,
+    name="sync.sync_updated_pages_and_polygons_tto",
+    queue=getattr(settings, "CELERY_SYNC_QUEUE", "sync"),
+    max_retries=5,
+    autoretry_for=(Exception,),
+    retry_backoff=True,   # exponential backoff: 1s, 2s, 4s, ...
+    retry_jitter=True,    # add random jitter to reduce thundering herd
+    acks_late=True,       # don't ack until the task finishes
+)
+def sync_updated_pages_and_polygons_tto_task(
+    self,
+    workspace_id: int,
+    project_name_field: str = "name",
+    project_file_link_field: Optional[str] = None,
+    actor_email: Optional[str] = None,
+    user_email: Optional[str] = None,
+    verbose: bool = False,
+) -> None:
+    """
+    Celery wrapper around sync.service_tto.sync_updated_pages_and_polygons_tto(...).
+
+    This performs INCREMENTAL sync - only syncs updated pages and polygons,
+    not the entire project. Much more efficient than full sync.
+    """
+    ws = Workspace.objects.get(pk=workspace_id)
+
+    # Fill emails if not provided
+    user_email = user_email or _resolve_workspace_email(ws)
+    actor_email = actor_email or getattr(settings, "TTO_ACTOR_EMAIL", None) or user_email
+
+    if verbose:
+        logger.info(
+            "Starting INCREMENTAL TTO sync for Workspace(id=%s), actor=%s, user=%s",
+            ws.pk, actor_email, user_email
+        )
+
+    # Construct your existing API client using settings/params
+    api = TTOApi(
+        auth_code=getattr(settings, "TTO_AUTH_CODE", None),
+        user_email=user_email,
+        actor_email=actor_email,
+    )
+
+    # Call the incremental sync service
+    sync_updated_pages_and_polygons_tto(
+        workspace_id=ws.pk,
+        api=api,
+        project_name_field=project_name_field,
+        project_file_link_field=project_file_link_field,
+        verbose=verbose,
+    )
+
+    if verbose:
+        logger.info("Completed INCREMENTAL TTO sync for Workspace(id=%s)", ws.pk)
+
+
+@shared_task(
     name="sync.dispatch_all_pending_workspace_syncs",
     queue=getattr(settings, "CELERY_SYNC_QUEUE", "sync"),
 )
@@ -123,7 +180,8 @@ def dispatch_all_pending_workspace_syncs(limit: int = 50, verbose: bool = False)
 
     count = 0
     for ws in qs[:limit]:
-        sync_workspace_tree_tto_task.delay(
+        # Use incremental sync by default for better performance
+        sync_updated_pages_and_polygons_tto_task.delay(
             workspace_id=ws.pk,
             project_name_field="name",
             project_file_link_field=None,
@@ -131,7 +189,7 @@ def dispatch_all_pending_workspace_syncs(limit: int = 50, verbose: bool = False)
         )
         count += 1
         if verbose:
-            logger.info("Enqueued TTO sync for Workspace(id=%s)", ws.pk)
+            logger.info("Enqueued INCREMENTAL TTO sync for Workspace(id=%s)", ws.pk)
 
     if verbose:
         logger.info("Dispatched %s workspace sync(s).", count)

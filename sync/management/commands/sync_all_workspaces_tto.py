@@ -6,7 +6,7 @@ from django.core.management.base import BaseCommand, CommandParser
 from django.db.models import Q, F
 
 from workspace.models import Workspace, SyncStatus
-from sync.tasks import sync_workspace_tree_tto_task
+from sync.tasks import sync_workspace_tree_tto_task, sync_updated_pages_and_polygons_tto_task
 
 
 class Command(BaseCommand):
@@ -93,7 +93,7 @@ class Command(BaseCommand):
         id_iter = qs.values_list("pk", flat=True).iterator(chunk_size=batch_size)
 
         for pk in id_iter:
-            sync_workspace_tree_tto_task.delay(
+            sync_updated_pages_and_polygons_tto_task.delay(
                 workspace_id=pk,
                 verbose=verbose_task,
             )

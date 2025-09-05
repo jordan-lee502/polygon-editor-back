@@ -8,7 +8,7 @@ import logging
 
 from workspace.models import Workspace, PageImage
 from annotations.models import Polygon
-from sync.tasks import sync_workspace_tree_tto_task
+from sync.tasks import sync_workspace_tree_tto_task, sync_updated_pages_and_polygons_tto_task
 
 log = logging.getLogger(__name__)
 
@@ -105,7 +105,7 @@ def process_pending_sync_workspaces(batch_size: int = 10, verbose: bool = False)
                 print(f"\n[TTO Sync] Processing workspace #{ws.pk}")
             log.info("TTO: syncing workspace %s", ws.pk)
 
-            sync_workspace_tree_tto_task.delay(workspace_id=ws.id)
+            sync_updated_pages_and_polygons_tto_task.delay(workspace_id=ws.id)
 
         except Exception as e:
             log.exception("TTO: sync failed for workspace %s: %s", ws.pk, e)

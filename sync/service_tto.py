@@ -93,6 +93,7 @@ def sync_workspace_tree_tto(
     project_name_field: str = "name",
     project_file_link_field: Optional[str] = None,
     verbose: bool = False,
+    sync_mode: str = "incremental",  # "incremental" or "full"
 ):
     def log(msg: str):
         if verbose:
@@ -345,17 +346,55 @@ def sync_workspace_tree_tto(
                             f"[Polygons] Updated polygon_id={poly.sync_id} (poly_id='{local_poly_id_str}')"
                         )
 
-        log("\n=== TTO SYNC SUMMARY ===")
-        log(
-            f"Project: id={ws.sync_id} name='{ws_name}' (bind={int(need_project_bind)}, update={int(need_project_update)})"
-        )
-        log(
-            f"Pages:   bound={pages_bound} created={pages_created} updated={pages_updated}"
-        )
-        log(
-            f"Polygons: bound={polys_bound} created={polys_created} updated={polys_updated}"
-        )
-        log("=== TTO SYNC END ===\n")
+        # ---------- Polygon Cleanup: Delete remote polygons that no longer exist locally ----------
+        polys_deleted = 0
+        log(f"[Polygons] Starting cleanup of remote polygons...")
+
+        for pg in pages_for_polys.iterator(chunk_size=200):
+            if pg.sync_id is None:
+                continue  # Skip pages that aren't synced yet
+
+            # Get all local polygons for this page
+            local_polygons = Polygon.objects.filter(page=pg)
+            local_poly_ids = set(str(p.polygon_id) for p in local_polygons)
+
+            # Get all remote polygons for this page
+            remote_polys = api.list_polygons_for_page(pg.sync_id) or []
+            log(f"[Polygons] Checking page_id={pg.sync_id}: {len(local_polygons)} local, {len(remote_polys)} remote")
+
+            # Collect polygons to delete
+            polygons_to_delete = []
+
+            # Find remote polygons that don't exist locally
+            for remote_poly in remote_polys:
+                if not isinstance(remote_poly, dict):
+                    continue
+
+                remote_poly_id = str(remote_poly.get("poly_id", ""))
+                remote_polygon_id = remote_poly.get("polygon_id")
+                remote_project_id = remote_poly.get("project_id")
+                remote_page_id = remote_poly.get("page_id")
+
+                if (remote_poly_id and remote_polygon_id and
+                    remote_project_id and remote_page_id and
+                    remote_poly_id not in local_poly_ids):
+
+                    polygons_to_delete.append({
+                        "polygon_id": int(remote_polygon_id),
+                        "project_id": int(remote_project_id),
+                        "page_id": int(remote_page_id),
+                        "poly_id": str(remote_poly_id)
+                    })
+
+            # Delete polygons in batches
+            if polygons_to_delete:
+                try:
+                    api.bulk_delete_polygons(polygons_to_delete)
+                    polys_deleted += len(polygons_to_delete)
+                    log(f"[Polygons] Deleted {len(polygons_to_delete)} polygons from page_id={pg.sync_id}")
+                except Exception as e:
+                    log(f"[Polygons] Failed to delete polygons from page_id={pg.sync_id}: {e}")
+
 
         finish(SyncStatus.SUCCESS)  # <-- success + release
 
@@ -365,4 +404,242 @@ def sync_workspace_tree_tto(
             sync_status=SyncStatus.FAILED,
         )
         log(f"[ERROR] Sync failed: {e}")
+        raise
+
+
+def sync_updated_pages_and_polygons_tto(
+    workspace_id: int,
+    api: TTOApi,
+    *,
+    project_name_field: str = "name",
+    project_file_link_field: Optional[str] = None,
+    verbose: bool = False,
+):
+    """
+    Optimized sync function that only processes updated pages and polygons.
+    Skips project-level operations and focuses on incremental updates.
+    """
+    def log(msg: str):
+        if verbose:
+            print(msg)
+
+    # Check if workspace exists and is not being processed
+    try:
+        ws = Workspace.objects.get(pk=workspace_id)
+    except Workspace.DoesNotExist:
+        log(f"[ERROR] Workspace {workspace_id} not found")
+        return
+
+    if ws.sync_status == SyncStatus.PROCESSING:
+        log(f"[Skip] Workspace {workspace_id} is already being processed")
+        return
+
+    # Set processing status
+    Workspace.objects.filter(pk=ws.pk).update(sync_status=SyncStatus.PROCESSING)
+
+    def finish(status: SyncStatus):
+        """Release lock + set final status"""
+        Workspace.objects.filter(pk=ws.pk).update(
+            sync_status=status,
+            synced_at=timezone.now(),
+        )
+
+    ws_name = getattr(ws, project_name_field, "")
+    log(f"\n=== INCREMENTAL SYNC START: Workspace #{ws.id} — \"{ws_name}\" ===")
+
+    try:
+        # Only process if workspace is already synced (has sync_id)
+        if ws.sync_id is None:
+            log("[Skip] Workspace not yet synced. Use full sync first.")
+            finish(SyncStatus.SUCCESS)
+            return
+
+        # Find only updated pages and polygons
+        updated_pages = PageImage.objects.filter(workspace=ws).filter(
+            Q(synced_at__isnull=True) | Q(updated_at__gt=F("synced_at"))
+        )
+
+        updated_polygons = Polygon.objects.filter(page__workspace=ws).filter(
+            Q(synced_at__isnull=True) | Q(updated_at__gt=F("synced_at"))
+        )
+
+        log(f"[Pages] Found {updated_pages.count()} pages needing sync")
+        log(f"[Polygons] Found {updated_polygons.count()} polygons needing sync")
+
+        if not updated_pages.exists() and not updated_polygons.exists():
+            log("[Skip] No updated pages or polygons found. Everything is synced.")
+            finish(SyncStatus.SUCCESS)
+            return
+
+        # Counters
+        pages_updated = 0
+        pages_created = 0
+        polys_updated = 0
+        polys_created = 0
+        polys_bound = 0
+        polys_deleted = 0
+
+        # ---------- Sync Updated Pages ----------
+        for pg in updated_pages.iterator(chunk_size=200):
+            page_nb = int(getattr(pg, "page_number", 0))
+
+            if pg.sync_id is None:
+                # Create new page
+                payload = _page_payload_from_model(pg)
+                new_page_id = api.create_page(
+                    project_id=ws.sync_id,
+                    page_nb=payload["page_nb"],
+                    picture_link=payload["picture_link"],
+                    scale=payload["scale"],
+                    unit=payload["unit"],
+                    image_height=payload["image_height"],
+                    image_width=payload["image_width"],
+                    pdf_height=payload["pdf_height"],
+                    pdf_width=payload["pdf_width"],
+                    json_str=payload["json_str"],
+                )
+                _bind_sync(pg, new_page_id)
+                pages_created += 1
+                log(f"[Pages] Created page_nb={page_nb} -> page_id={pg.sync_id}")
+            else:
+                # Update existing page
+                payload = _page_payload_from_model(pg)
+                api.update_page(
+                    page_id=pg.sync_id,
+                    page_nb=payload["page_nb"],
+                    picture_link=payload["picture_link"],
+                    scale=payload["scale"],
+                    confirmed_scale=payload["confirmed_scale"],
+                    unit=payload["unit"],
+                    image_height=payload["image_height"],
+                    image_width=payload["image_width"],
+                    pdf_height=payload["pdf_height"],
+                    pdf_width=payload["pdf_width"],
+                    json_str=payload["json_str"],
+                )
+                PageImage.objects.filter(pk=pg.pk).update(synced_at=timezone.now())
+                pages_updated += 1
+                log(f"[Pages] Updated page_id={pg.sync_id} (page_nb={page_nb})")
+
+        # ---------- Sync Updated Polygons ----------
+        page_ids_for_polys = list(updated_polygons.values_list("page_id", flat=True).distinct())
+        pages_for_polys = PageImage.objects.filter(pk__in=page_ids_for_polys)
+
+        for pg in pages_for_polys.iterator(chunk_size=200):
+            if pg.sync_id is None:
+                continue  # Skip pages that aren't synced yet
+
+            polys_to_process = updated_polygons.filter(page=pg)
+
+            # Get remote polygons for comparison
+            remote_polys = api.list_polygons_for_page(pg.sync_id) or []
+            remote_by_polyid = {
+                str(r.get("poly_id", "")): r
+                for r in remote_polys
+                if isinstance(r, dict)
+            }
+
+            for poly in polys_to_process.iterator(chunk_size=500):
+                local_poly_id_str = str(poly.polygon_id)
+
+                if poly.sync_id is None:
+                    # Check if polygon exists remotely first
+                    rp = remote_by_polyid.get(local_poly_id_str)
+                    if rp:
+                        # Bind to existing remote polygon
+                        _bind_sync(poly, int(rp["polygon_id"]))
+                        polys_bound += 1
+                        log(f"[Polygons] Bound poly_id='{local_poly_id_str}' -> polygon_id={poly.sync_id}")
+                    else:
+                        # Create new polygon
+                        new_poly_id = api.create_polygon(
+                            project_id=ws.sync_id,
+                            page_id=pg.sync_id,
+                            poly_id=local_poly_id_str,
+                            vertices=poly.vertices,
+                            total_vertices=poly.total_vertices,
+                        )
+                        _bind_sync(poly, new_poly_id)
+                        polys_created += 1
+                        log(f"[Polygons] Created poly_id='{local_poly_id_str}' -> polygon_id={poly.sync_id}")
+                else:
+                    # Update existing polygon
+                    api.update_polygon(
+                        polygon_id=poly.sync_id,
+                        poly_id=local_poly_id_str,
+                        vertices=poly.vertices,
+                        total_vertices=poly.total_vertices,
+                    )
+                    Polygon.objects.filter(pk=poly.pk).update(synced_at=timezone.now())
+                    polys_updated += 1
+                    log(f"[Polygons] Updated polygon_id={poly.sync_id} (poly_id='{local_poly_id_str}')")
+
+        # ---------- Cleanup: Delete remote polygons that no longer exist locally ----------
+        log(f"[Polygons] Starting cleanup of remote polygons...")
+
+        # Only cleanup pages that have polygons (either local or remote)
+        all_pages_with_polys = set()
+        for poly in updated_polygons:
+            all_pages_with_polys.add(poly.page_id)
+
+        # Add pages that might have remote polygons
+        for pg in pages_for_polys:
+            all_pages_with_polys.add(pg.id)
+
+        pages_for_cleanup = PageImage.objects.filter(pk__in=all_pages_with_polys)
+
+        for pg in pages_for_cleanup.iterator(chunk_size=200):
+            if pg.sync_id is None:
+                continue
+
+            # Get all local polygons for this page
+            local_polygons = Polygon.objects.filter(page=pg)
+            local_poly_ids = set(str(p.polygon_id) for p in local_polygons)
+
+            # Get all remote polygons for this page
+            remote_polys = api.list_polygons_for_page(pg.sync_id) or []
+            log(f"[Polygons] Checking page_id={pg.sync_id}: {len(local_polygons)} local, {len(remote_polys)} remote")
+
+            # Collect polygons to delete
+            polygons_to_delete = []
+
+            for remote_poly in remote_polys:
+                if not isinstance(remote_poly, dict):
+                    continue
+
+                remote_poly_id = str(remote_poly.get("poly_id", ""))
+                remote_polygon_id = remote_poly.get("polygon_id")
+                remote_project_id = remote_poly.get("project_id")
+                remote_page_id = remote_poly.get("page_id")
+
+                if (remote_poly_id and remote_polygon_id and
+                    remote_project_id and remote_page_id and
+                    remote_poly_id not in local_poly_ids):
+
+                    polygons_to_delete.append({
+                        "polygon_id": int(remote_polygon_id),
+                        "project_id": int(remote_project_id),
+                        "page_id": int(remote_page_id),
+                        "poly_id": str(remote_poly_id)
+                    })
+
+            # Delete polygons in batches
+            if polygons_to_delete:
+                try:
+                    api.bulk_delete_polygons(polygons_to_delete)
+                    polys_deleted += len(polygons_to_delete)
+                    log(f"[Polygons] Deleted {len(polygons_to_delete)} polygons from page_id={pg.sync_id}")
+                except Exception as e:
+                    log(f"[Polygons] Failed to delete polygons from page_id={pg.sync_id}: {e}")
+
+        log("\n=== INCREMENTAL SYNC SUMMARY ===")
+        log(f"Pages:   created={pages_created} updated={pages_updated}")
+        log(f"Polygons: bound={polys_bound} created={polys_created} updated={polys_updated} deleted={polys_deleted}")
+        log("=== INCREMENTAL SYNC END ===\n")
+
+        finish(SyncStatus.SUCCESS)
+
+    except Exception as e:
+        Workspace.objects.filter(pk=ws.pk).update(sync_status=SyncStatus.FAILED)
+        log(f"[ERROR] Incremental sync failed: {e}")
         raise
