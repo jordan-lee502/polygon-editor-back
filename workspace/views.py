@@ -256,8 +256,7 @@ def workspace_polygons(request, workspace_id):
 
     print("workspace_polygons")
     # Ownership check
-    # ws = _get_workspace_for_user_or_404(request.user, workspace_id)
-
+    ws = _get_workspace_for_user_or_404(request.user, workspace_id)
 
     if request.method == "GET":
         polygons = Polygon.objects.filter(workspace_id=ws.id).select_related("page")
