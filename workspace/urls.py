@@ -16,8 +16,23 @@ urlpatterns = [
     ),
     path(
         "workspaces/<int:workspace_id>/pages/<int:page_id>/polygons/create/",
-        views.create_single_polygon,
-        name="create-single-polygon",
+        views.create_multi_polygon,
+        name="create-multi-polygon",
+    ),
+    path(
+        "workspaces/<int:workspace_id>/pages/<int:page_id>/polygons/create-multi/",
+        views.create_multi_polygon,
+        name="create-multi-polygon-alt",
+    ),
+    path(
+        "workspaces/<int:workspace_id>/pages/<int:page_id>/polygons/<int:polygon_id>/delete/",
+        views.delete_single_polygon,
+        name="delete-single-polygon",
+    ),
+    path(
+        "workspaces/<int:workspace_id>/pages/<int:page_id>/polygons/delete-multiple/",
+        views.delete_multiple_polygons,
+        name="delete-multiple-polygons",
     ),
     path(
         "workspaces/<int:workspace_id>/pages/<int:page_id>/polygons/",
