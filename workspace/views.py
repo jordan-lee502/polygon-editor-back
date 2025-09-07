@@ -1008,10 +1008,10 @@ def analyze_page_scale(request, page_id: int):
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
-def create_single_polygon(request, workspace_id, page_id):
+def create_multi_polygon(request, workspace_id, page_id):
     """
-    Create a single polygon without affecting existing polygons.
-    This is used when drawing a new polygon.
+    Create multiple polygons without affecting existing polygons.
+    This is used when drawing multiple new polygons.
     """
     # Ownership check
     ws = _get_workspace_for_user_or_404(request.user, workspace_id)
@@ -1025,20 +1025,17 @@ def create_single_polygon(request, workspace_id, page_id):
         )
 
     data = request.data
-    if not isinstance(data, dict):
+    if not isinstance(data, list):
         return Response(
-            {"detail": "Expected a single polygon object."},
+            {"detail": "Expected a list of polygon objects."},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # Validate required fields
-    required_fields = ["vertices"]
-    for field in required_fields:
-        if field not in data:
-            return Response(
-                {"detail": f"Missing required field: {field}"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+    if not data:
+        return Response(
+            {"detail": "No polygons provided."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     try:
         # Get the largest polygon_id for this page and add 1
@@ -1047,7 +1044,7 @@ def create_single_polygon(request, workspace_id, page_id):
             page=page_obj
         ).aggregate(max_id=Max('polygon_id'))['max_id']
 
-        polygon_id = (max_polygon_id or 0) + 1
+        current_polygon_id = (max_polygon_id or 0) + 1
 
         # Test database connection
         try:
@@ -1060,38 +1057,136 @@ def create_single_polygon(request, workspace_id, page_id):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-        # Validate vertices data
-        if not data["vertices"] or len(data["vertices"]) < 3:
+        created_polygons = []
+
+        try:
+            with transaction.atomic():
+                validation_errors = []
+
+                for i, polygon_data in enumerate(data):
+                    print(f"DEBUG: Processing polygon {i+1}/{len(data)}")
+                    print(f"DEBUG: Polygon data: {polygon_data}")
+
+                    # Validate required fields for each polygon
+                    required_fields = ["vertices"]
+                    for field in required_fields:
+                        if field not in polygon_data:
+                            error_msg = f"Polygon {i+1}: Missing required field '{field}'"
+                            print(f"DEBUG: {error_msg}")
+                            validation_errors.append(error_msg)
+                            continue
+
+                    # Validate vertices data
+                    if "vertices" in polygon_data:
+                        if not polygon_data["vertices"] or len(polygon_data["vertices"]) < 3:
+                            error_msg = f"Polygon {i+1}: Must have at least 3 vertices (got {len(polygon_data['vertices']) if polygon_data['vertices'] else 0})"
+                            print(f"DEBUG: {error_msg}")
+                            validation_errors.append(error_msg)
+                            continue
+
+                    # If validation passed, create the polygon
+                    try:
+                        print(f"DEBUG: Creating polygon {i+1} with polygon_id {current_polygon_id}")
+                        polygon = Polygon.objects.create(
+                            workspace_id=ws.id,
+                            page=page_obj,
+                            polygon_id=current_polygon_id,
+                            vertices=polygon_data["vertices"],
+                            total_vertices=len(polygon_data["vertices"]),
+                            name=polygon_data.get("name"),
+                            visible=polygon_data.get("visible", True),
+                        )
+
+                        created_polygons.append(polygon)
+                        current_polygon_id += 1
+                        print(f"SUCCESS: Created polygon {polygon.polygon_id} with ID {polygon.id}")
+
+                    except Exception as e:
+                        error_msg = f"Polygon {i+1}: Failed to create - {str(e)}"
+                        print(f"DEBUG: {error_msg}")
+                        validation_errors.append(error_msg)
+                        continue
+
+                # Check if we have any validation errors
+                if validation_errors:
+                    print(f"DEBUG: Found {len(validation_errors)} validation errors:")
+                    for error in validation_errors:
+                        print(f"  - {error}")
+
+                    # If no polygons were created at all, return error
+                    if not created_polygons:
+                        return Response(
+                            {"detail": f"Failed to create any polygons. Errors: {'; '.join(validation_errors)}"},
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                    else:
+                        print(f"DEBUG: Created {len(created_polygons)} polygons despite {len(validation_errors)} validation errors")
+
+            # Verify all polygons were actually saved (after transaction commits)
+            print(f"Verifying {len(created_polygons)} polygons were saved...")
+
+            # Force a fresh database connection to ensure we see committed data
+            from django.db import connection
+            connection.close()
+
+            # Wait a moment for database consistency
+            import time
+            time.sleep(0.1)
+
+            # Alternative: Try to refresh the objects from database
+            try:
+                for polygon in created_polygons:
+                    polygon.refresh_from_db()
+            except Exception as e:
+                print(f"DEBUG: Could not refresh polygons from DB: {e}")
+
+            verification_errors = []
+            for polygon in created_polygons:
+                print(f"DEBUG: Verifying polygon {polygon.polygon_id} (ID: {polygon.id})")
+
+                # Try multiple ways to find the polygon
+                saved_polygon = Polygon.objects.filter(id=polygon.id).first()
+                if not saved_polygon:
+                    # Try by polygon_id as backup
+                    saved_polygon = Polygon.objects.filter(
+                        workspace_id=ws.id,
+                        page=page_obj,
+                        polygon_id=polygon.polygon_id
+                    ).first()
+
+                if not saved_polygon:
+                    error_msg = f"Polygon {polygon.polygon_id} was not saved to database!"
+                    print(f"ERROR: {error_msg}")
+                    print(f"  - Tried to find by ID: {polygon.id}")
+                    print(f"  - Tried to find by polygon_id: {polygon.polygon_id}")
+
+                    # Debug: Show what polygons actually exist
+                    existing_polygons = Polygon.objects.filter(workspace_id=ws.id, page=page_obj)
+                    print(f"  - Existing polygons for this page: {list(existing_polygons.values_list('polygon_id', flat=True))}")
+
+                    verification_errors.append(error_msg)
+                else:
+                    print(f"SUCCESS: Polygon {polygon.polygon_id} verified in database (ID: {saved_polygon.id})")
+
+            # If we have verification errors, but some polygons were created, continue with partial success
+            if verification_errors:
+                print(f"WARNING: {len(verification_errors)} polygons failed verification:")
+                for error in verification_errors:
+                    print(f"  - {error}")
+
+                # Only return error if NO polygons were successfully verified
+                if len(verification_errors) == len(created_polygons):
+                    return Response(
+                        {"detail": f"Failed to save any polygons to database. Errors: {'; '.join(verification_errors)}"},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    )
+                else:
+                    print(f"INFO: Continuing with {len(created_polygons) - len(verification_errors)} successfully verified polygons")
+
+        except Exception as e:
+            print(f"ERROR in transaction: {str(e)}")
             return Response(
-                {"detail": "Polygon must have at least 3 vertices"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-
-        with transaction.atomic():
-            polygon = Polygon.objects.create(
-                workspace_id=ws.id,
-                page=page_obj,
-                polygon_id=polygon_id,
-                vertices=data["vertices"],
-                total_vertices=len(data["vertices"]),
-                name=data.get("name"),
-                visible=data.get("visible", True),
-            )
-
-
-        # Verify the polygon was actually saved
-        saved_polygon = Polygon.objects.filter(id=polygon.id).first()
-        if not saved_polygon:
-            print("ERROR: Polygon was not saved to database!")
-            print(f"Trying to find polygon by polygon_id: {polygon_id}")
-            saved_by_polygon_id = Polygon.objects.filter(polygon_id=polygon_id).first()
-            if saved_by_polygon_id:
-                print(f"Found polygon by polygon_id: {saved_by_polygon_id}")
-            else:
-                print("No polygon found by polygon_id either")
-            return Response(
-                {"detail": "Failed to save polygon to database"},
+                {"detail": f"Error creating polygons: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
@@ -1100,14 +1195,37 @@ def create_single_polygon(request, workspace_id, page_id):
         except Exception as e:
             print(f"Warning: Failed to queue sync task: {str(e)}")
 
-        serializer = PolygonSerializer(polygon)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+        # Summary of what was created
+        print(f"DEBUG: FINAL SUMMARY:")
+        print(f"  - Requested polygons: {len(data)}")
+        print(f"  - Successfully created: {len(created_polygons)}")
+        print(f"  - Failed to create: {len(data) - len(created_polygons)}")
+
+        if len(created_polygons) != len(data):
+            print(f"WARNING: Only created {len(created_polygons)} out of {len(data)} requested polygons!")
+
+        serializer = PolygonSerializer(created_polygons, many=True)
+        response_data = {
+            "created_polygons": serializer.data,
+            "summary": {
+                "requested": len(data),
+                "created": len(created_polygons),
+                "failed": len(data) - len(created_polygons),
+                "verification_errors": len(verification_errors) if 'verification_errors' in locals() else 0
+            }
+        }
+
+        # Add verification errors to response if any
+        if 'verification_errors' in locals() and verification_errors:
+            response_data["verification_errors"] = verification_errors
+
+        return Response(response_data, status=status.HTTP_201_CREATED)
 
     except Exception as e:
-        print(f"ERROR creating polygon: {str(e)}")
+        print(f"ERROR creating polygons: {str(e)}")
         print(f"Exception type: {type(e)}")
         return Response(
-            {"detail": f"Failed to create polygon: {str(e)}"},
+            {"detail": f"Failed to create polygons: {str(e)}"},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
