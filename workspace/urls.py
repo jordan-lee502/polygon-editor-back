@@ -20,6 +20,16 @@ urlpatterns = [
         name="create-single-polygon",
     ),
     path(
+        "workspaces/<int:workspace_id>/pages/<int:page_id>/polygons/<int:polygon_id>/delete/",
+        views.delete_single_polygon,
+        name="delete-single-polygon",
+    ),
+    path(
+        "workspaces/<int:workspace_id>/pages/<int:page_id>/polygons/delete-multiple/",
+        views.delete_multiple_polygons,
+        name="delete-multiple-polygons",
+    ),
+    path(
         "workspaces/<int:workspace_id>/pages/<int:page_id>/polygons/",
         views.workspace_page_polygons,
         name="workspace-page-polygons",

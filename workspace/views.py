@@ -6,7 +6,7 @@ from rest_framework.response import Response
 from rest_framework.exceptions import PermissionDenied, NotFound
 from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
-from django.db.models import Q
+from django.db.models import Q, Max
 from datetime import datetime, timezone as dt_timezone
 import os
 from PIL import Image
@@ -1032,7 +1032,7 @@ def create_single_polygon(request, workspace_id, page_id):
         )
 
     # Validate required fields
-    required_fields = ["polygon_id", "vertices"]
+    required_fields = ["vertices"]
     for field in required_fields:
         if field not in data:
             return Response(
@@ -1041,24 +1041,60 @@ def create_single_polygon(request, workspace_id, page_id):
             )
 
     try:
-        # Generate polygon_id if not provided
-        polygon_id = data.get("polygon_id")
-        if polygon_id is None:
-            import time
-            import random
-            polygon_id = int(time.time()) + random.randint(1000, 9999)
-
-        polygon = Polygon.objects.create(
+        # Get the largest polygon_id for this page and add 1
+        max_polygon_id = Polygon.objects.filter(
             workspace_id=ws.id,
-            page=page_obj,
-            polygon_id=polygon_id,
-            vertices=data["vertices"],
-            total_vertices=len(data["vertices"]),
-            name=data.get("name"),
-            visible=data.get("visible", True),
-        )
+            page=page_obj
+        ).aggregate(max_id=Max('polygon_id'))['max_id']
 
-        # Queue sync task (with error handling)
+        polygon_id = (max_polygon_id or 0) + 1
+
+        # Test database connection
+        try:
+            polygon_count = Polygon.objects.count()
+            print(f"Total polygons in database before creation: {polygon_count}")
+        except Exception as e:
+            print(f"Database connection test failed: {e}")
+            return Response(
+                {"detail": "Database connection issue"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        # Validate vertices data
+        if not data["vertices"] or len(data["vertices"]) < 3:
+            return Response(
+                {"detail": "Polygon must have at least 3 vertices"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+
+        with transaction.atomic():
+            polygon = Polygon.objects.create(
+                workspace_id=ws.id,
+                page=page_obj,
+                polygon_id=polygon_id,
+                vertices=data["vertices"],
+                total_vertices=len(data["vertices"]),
+                name=data.get("name"),
+                visible=data.get("visible", True),
+            )
+
+
+        # Verify the polygon was actually saved
+        saved_polygon = Polygon.objects.filter(id=polygon.id).first()
+        if not saved_polygon:
+            print("ERROR: Polygon was not saved to database!")
+            print(f"Trying to find polygon by polygon_id: {polygon_id}")
+            saved_by_polygon_id = Polygon.objects.filter(polygon_id=polygon_id).first()
+            if saved_by_polygon_id:
+                print(f"Found polygon by polygon_id: {saved_by_polygon_id}")
+            else:
+                print("No polygon found by polygon_id either")
+            return Response(
+                {"detail": "Failed to save polygon to database"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
         try:
             sync_updated_pages_and_polygons_tto_task.delay(workspace_id=ws.id)
         except Exception as e:
@@ -1068,7 +1104,154 @@ def create_single_polygon(request, workspace_id, page_id):
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
     except Exception as e:
+        print(f"ERROR creating polygon: {str(e)}")
+        print(f"Exception type: {type(e)}")
         return Response(
             {"detail": f"Failed to create polygon: {str(e)}"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+
+@api_view(["DELETE"])
+@permission_classes([IsAuthenticated])
+def delete_single_polygon(request, workspace_id, page_id, polygon_id):
+    """
+    Delete a single polygon by polygon_id.
+    """
+    # Ownership check
+    ws = _get_workspace_for_user_or_404(request.user, workspace_id)
+
+    try:
+        page_obj = PageImage.objects.get(workspace_id=ws.id, id=page_id)
+    except ObjectDoesNotExist:
+        return Response(
+            {"detail": f"Page {page_id} not found for workspace {ws.id}"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    try:
+        # Find and delete the polygon(s) - handle multiple polygons with same polygon_id
+        polygons = Polygon.objects.filter(
+            workspace_id=ws.id,
+            page=page_obj,
+            polygon_id=polygon_id
+        )
+
+        if not polygons.exists():
+            return Response(
+                {"detail": f"Polygon {polygon_id} not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Delete all polygons with this polygon_id
+        count = polygons.count()
+        polygons.delete()
+        print(f"Deleted {count} polygons with polygon_id {polygon_id}")
+
+        # Queue sync task
+        try:
+            sync_updated_pages_and_polygons_tto_task.delay(workspace_id=ws.id)
+        except Exception as e:
+            print(f"Warning: Failed to queue sync task: {str(e)}")
+
+        return Response(
+            {"detail": f"Polygon {polygon_id} deleted successfully ({count} polygons removed)"},
+            status=status.HTTP_200_OK,
+        )
+
+    except Exception as e:
+        return Response(
+            {"detail": f"Failed to delete polygon: {str(e)}"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+
+@api_view(["DELETE"])
+@permission_classes([IsAuthenticated])
+def delete_multiple_polygons(request, workspace_id, page_id):
+    """
+    Delete multiple polygons by polygon_ids.
+    Expects a JSON body with 'polygon_ids' array.
+    """
+    # Ownership check
+    ws = _get_workspace_for_user_or_404(request.user, workspace_id)
+
+    try:
+        page_obj = PageImage.objects.get(workspace_id=ws.id, id=page_id)
+    except ObjectDoesNotExist:
+        return Response(
+            {"detail": f"Page {page_id} not found for workspace {ws.id}"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    data = request.data
+    if not isinstance(data, dict):
+        return Response(
+            {"detail": "Expected a JSON object."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Validate required fields
+    if "polygon_ids" not in data:
+        return Response(
+            {"detail": "Missing required field: polygon_ids"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    polygon_ids = data["polygon_ids"]
+    if not isinstance(polygon_ids, list) or len(polygon_ids) == 0:
+        return Response(
+            {"detail": "polygon_ids must be a non-empty array"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        # Find and delete the polygons
+        deleted_count = 0
+        not_found_ids = []
+
+        for polygon_id in polygon_ids:
+            try:
+                # Use filter() instead of get() to handle multiple polygons with same polygon_id
+                polygons = Polygon.objects.filter(
+                    workspace_id=ws.id,
+                    page=page_obj,
+                    polygon_id=polygon_id
+                )
+
+                if polygons.exists():
+                    # Delete all polygons with this polygon_id
+                    count = polygons.count()
+                    polygons.delete()
+                    deleted_count += count
+                    print(f"Deleted {count} polygons with polygon_id {polygon_id}")
+                else:
+                    not_found_ids.append(polygon_id)
+
+            except Exception as e:
+                print(f"Error deleting polygon {polygon_id}: {str(e)}")
+                not_found_ids.append(polygon_id)
+
+        # Queue sync task
+        try:
+            sync_updated_pages_and_polygons_tto_task.delay(workspace_id=ws.id)
+        except Exception as e:
+            print(f"Warning: Failed to queue sync task: {str(e)}")
+
+        response_data = {
+            "detail": f"Successfully deleted {deleted_count} polygons",
+            "deleted_count": deleted_count,
+            "total_requested": len(polygon_ids)
+        }
+
+        if not_found_ids:
+            response_data["not_found_ids"] = not_found_ids
+            response_data["detail"] += f", {len(not_found_ids)} polygons not found"
+
+        return Response(response_data, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        return Response(
+            {"detail": f"Failed to delete polygons: {str(e)}"},
             status=status.HTTP_400_BAD_REQUEST,
         )
