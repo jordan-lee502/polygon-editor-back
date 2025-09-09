@@ -16,7 +16,7 @@ except Exception:  # pragma: no cover
     from workspaces.models import Workspace  # type: ignore
 
 # Your existing service & API client
-from sync.service_tto import sync_workspace_tree_tto, sync_updated_pages_and_polygons_tto
+from sync.service_tto import sync_workspace_tree_tto
 from sync.api_client_tto import TTOApi
 
 
@@ -140,12 +140,13 @@ def sync_updated_pages_and_polygons_tto_task(
     )
 
     # Call the incremental sync service
-    sync_updated_pages_and_polygons_tto(
+    sync_workspace_tree_tto(
         workspace_id=ws.pk,
         api=api,
         project_name_field=project_name_field,
         project_file_link_field=project_file_link_field,
         verbose=verbose,
+        sync_mode="incremental",
     )
 
     if verbose:

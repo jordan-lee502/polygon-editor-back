@@ -28,7 +28,7 @@ from workspace.services.scale_bar_service import ScaleBarService, ScaleRequest
 
 from uuid import uuid4
 from processing.tasks import process_workspace_task
-from sync.tasks import sync_workspace_tree_tto_task, sync_updated_pages_and_polygons_tto_task
+from sync.tasks import sync_workspace_tree_tto_task
 from django.utils import timezone
 
 # ---------- helpers ----------
@@ -256,8 +256,7 @@ def workspace_polygons(request, workspace_id):
 
     print("workspace_polygons")
     # Ownership check
-    # ws = _get_workspace_for_user_or_404(request.user, workspace_id)
-
+    ws = _get_workspace_for_user_or_404(request.user, workspace_id)
 
     if request.method == "GET":
         polygons = Polygon.objects.filter(workspace_id=ws.id).select_related("page")
@@ -342,7 +341,7 @@ def workspace_polygons(request, workspace_id):
     final_polygons = Polygon.objects.filter(workspace_id=ws.id)
     serializer = PolygonSerializer(final_polygons, many=True)
 
-    sync_updated_pages_and_polygons_tto_task.delay(workspace_id=ws.id)
+    sync_workspace_tree_tto_task.delay(workspace_id=ws.id)
 
     return Response(serializer.data, status=status.HTTP_200_OK)
 
@@ -448,7 +447,7 @@ def workspace_page_polygons(request, workspace_id, page_id):
 
     # Return fresh list for the page
     final_polys = Polygon.objects.filter(workspace_id=ws.id, page_id=page_obj.id)
-    sync_updated_pages_and_polygons_tto_task.delay(workspace_id=ws.id)
+    sync_workspace_tree_tto_task.delay(workspace_id=ws.id)
 
     return Response(
         PolygonSerializer(final_polys, many=True).data, status=status.HTTP_200_OK
@@ -1131,7 +1130,7 @@ def create_multi_polygon(request, workspace_id, page_id):
 
             # Wait a moment for database consistency
             import time
-            time.sleep(0.1)
+            time.sleep(0.2)  # Increased delay for better consistency
 
             # Alternative: Try to refresh the objects from database
             try:
@@ -1140,11 +1139,26 @@ def create_multi_polygon(request, workspace_id, page_id):
             except Exception as e:
                 print(f"DEBUG: Could not refresh polygons from DB: {e}")
 
+            # Additional verification: Check if polygons exist by querying fresh from DB
+            print(f"DEBUG: Performing additional verification by querying fresh polygons...")
+            fresh_polygons = Polygon.objects.filter(
+                workspace_id=ws.id,
+                page=page_obj,
+                polygon_id__in=[p.polygon_id for p in created_polygons]
+            )
+            fresh_polygon_ids = set(fresh_polygons.values_list('polygon_id', flat=True))
+            print(f"DEBUG: Found {len(fresh_polygon_ids)} fresh polygons in database: {list(fresh_polygon_ids)}")
+
             verification_errors = []
             for polygon in created_polygons:
                 print(f"DEBUG: Verifying polygon {polygon.polygon_id} (ID: {polygon.id})")
 
-                # Try multiple ways to find the polygon
+                # Check if polygon exists in our fresh query results
+                if polygon.polygon_id in fresh_polygon_ids:
+                    print(f"SUCCESS: Polygon {polygon.polygon_id} verified in database (found in fresh query)")
+                    continue
+
+                # Try multiple ways to find the polygon as fallback
                 saved_polygon = Polygon.objects.filter(id=polygon.id).first()
                 if not saved_polygon:
                     # Try by polygon_id as backup
@@ -1159,6 +1173,7 @@ def create_multi_polygon(request, workspace_id, page_id):
                     print(f"ERROR: {error_msg}")
                     print(f"  - Tried to find by ID: {polygon.id}")
                     print(f"  - Tried to find by polygon_id: {polygon.polygon_id}")
+                    print(f"  - Fresh query found: {fresh_polygon_ids}")
 
                     # Debug: Show what polygons actually exist
                     existing_polygons = Polygon.objects.filter(workspace_id=ws.id, page=page_obj)
@@ -1190,10 +1205,19 @@ def create_multi_polygon(request, workspace_id, page_id):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-        try:
-            sync_updated_pages_and_polygons_tto_task.delay(workspace_id=ws.id)
-        except Exception as e:
-            print(f"Warning: Failed to queue sync task: {str(e)}")
+        # Only queue sync task if we successfully created some polygons
+        if created_polygons:
+            try:
+                # Use full sync with delay to avoid interfering with verification
+                sync_workspace_tree_tto_task.apply_async(
+                    args=[ws.id],
+                    countdown=2  # Wait 2 seconds before syncing
+                )
+                print(f"DEBUG: Queued FULL sync task for {len(created_polygons)} polygons (delayed by 2 seconds)")
+            except Exception as e:
+                print(f"Warning: Failed to queue sync task: {str(e)}")
+        else:
+            print("DEBUG: No polygons created, skipping sync task")
 
         # Summary of what was created
         print(f"DEBUG: FINAL SUMMARY:")
@@ -1268,7 +1292,7 @@ def delete_single_polygon(request, workspace_id, page_id, polygon_id):
 
         # Queue sync task
         try:
-            sync_updated_pages_and_polygons_tto_task.delay(workspace_id=ws.id)
+            sync_workspace_tree_tto_task.delay(workspace_id=ws.id)
         except Exception as e:
             print(f"Warning: Failed to queue sync task: {str(e)}")
 
@@ -1352,7 +1376,7 @@ def delete_multiple_polygons(request, workspace_id, page_id):
 
         # Queue sync task
         try:
-            sync_updated_pages_and_polygons_tto_task.delay(workspace_id=ws.id)
+            sync_workspace_tree_tto_task.delay(workspace_id=ws.id)
         except Exception as e:
             print(f"Warning: Failed to queue sync task: {str(e)}")
 

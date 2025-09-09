@@ -22,7 +22,7 @@ from processing.pdf_processor import (
 # Workspace model
 from workspace.models import Workspace
 
-from sync.tasks import sync_workspace_tree_tto_task, sync_updated_pages_and_polygons_tto_task
+from sync.tasks import sync_workspace_tree_tto_task
 
 log = logging.getLogger(__name__)
 
@@ -107,7 +107,7 @@ def process_workspace_task(
         run_processor(ws, max_zoom=(max_zoom if max_zoom is not None else DEFAULT_MAX_ZOOM))
 
         # 4) Kick off TTO sync for this workspace
-        sync_updated_pages_and_polygons_tto_task.delay(workspace_id=ws.id)
+        sync_workspace_tree_tto_task.delay(workspace_id=ws.id)
 
         if verbose:
             log.info("Done processing Workspace(%s)", ws.id)

@@ -2,7 +2,7 @@
 
 from django.core.management.base import BaseCommand, CommandParser
 from workspace.models import Workspace
-from sync.tasks import sync_updated_pages_and_polygons_tto_task
+from sync.tasks import sync_workspace_tree_tto_task
 
 
 class Command(BaseCommand):
@@ -25,7 +25,7 @@ class Command(BaseCommand):
             )
 
             # Enqueue the incremental sync task
-            sync_updated_pages_and_polygons_tto_task.delay(
+            sync_workspace_tree_tto_task.delay(
                 workspace_id=ws.id,
                 project_name_field=opts["project_name_field"],
                 project_file_link_field=opts["project_file_link_field"],
