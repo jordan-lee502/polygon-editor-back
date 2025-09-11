@@ -94,6 +94,7 @@ def sync_workspace_tree_tto(
     project_file_link_field: Optional[str] = None,
     verbose: bool = False,
     sync_mode: str = "incremental",  # "incremental" or "full"
+    page_id: Optional[int] = None,  # Optional specific page ID to sync
 ):
     def log(msg: str):
         if verbose:
@@ -207,9 +208,16 @@ def sync_workspace_tree_tto(
             )
 
         # ---------- Pages (only those that need it) ----------
-        pages_to_process = PageImage.objects.filter(
+        pages_query = PageImage.objects.filter(
             pk__in=pages_need_qs.values_list("pk", flat=True)
         )
+
+        # If page_id is specified, only sync that specific page
+        if page_id is not None:
+            pages_query = pages_query.filter(pk=page_id)
+            log(f"[Pages] Syncing specific page_id: {page_id}")
+
+        pages_to_process = pages_query
         log(f"[Pages] Local pages needing work: {pages_to_process.count()}")
 
         need_page_bind_exists = pages_to_process.filter(sync_id__isnull=True).exists()

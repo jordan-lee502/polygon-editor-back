@@ -6,12 +6,10 @@ from rest_framework.response import Response
 from rest_framework.exceptions import PermissionDenied, NotFound
 from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
-from django.db.models import Q, Max
-from datetime import datetime, timezone as dt_timezone
+from django.db.models import Q
 import os
-from PIL import Image
 
-from .models import Workspace, PageImage, ScaleUnit
+from .models import Workspace, PageImage
 from annotations.models import Polygon
 from .serializers import WorkspaceSerializer, PageImageSerializer
 from annotations.serializers import PolygonSerializer
@@ -23,13 +21,18 @@ from django.shortcuts import get_object_or_404
 
 from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
-from workspace.services.scale_bar_processor import LineStatus
 from workspace.services.scale_bar_service import ScaleBarService, ScaleRequest
+from workspace.services.scale_bar_processor import LineStatus
+from PIL import Image
 
 from uuid import uuid4
-from processing.tasks import process_workspace_task
-from sync.tasks import sync_workspace_tree_tto_task
-from django.utils import timezone
+from processing.tasks import process_workspace_task, simple_page_process_task
+
+
+from workspace.models import (
+    ExtractStatus,
+    SegmentationChoice,
+)
 
 # ---------- helpers ----------
 
@@ -121,6 +124,8 @@ def list_workspaces(request):
     ratio_raw = request.data.get("default_scale_ratio", None)
     unit_raw = request.data.get("default_scale_unit", None)
 
+    auto_extract_on_upload = request.data.get("auto_extract_on_upload", False)
+
     if not name:
         return Response(
             {"detail": "name is required"}, status=status.HTTP_400_BAD_REQUEST
@@ -194,9 +199,10 @@ def list_workspaces(request):
         if ratio is not None:
             ws.default_scale_ratio = ratio
             ws.default_scale_unit = unit
+        ws.auto_extract_on_upload = auto_extract_on_upload
         ws.save()
 
-    process_workspace_task.delay(workspace_id=ws.id)
+        process_workspace_task.delay(workspace_id=ws.id, auto_extract_on_upload=auto_extract_on_upload)
 
     return Response(WorkspaceSerializer(ws).data, status=status.HTTP_201_CREATED)
 
@@ -872,16 +878,28 @@ def patch_workspace_scale(request, workspace_id: int):
     return Response(data, status=status.HTTP_200_OK)
 
 
-EXTERNAL_URL = (
-    "https://dti-fast-apis-962827849375.us-central1.run.app/scale/process-scale-bar"
-)
-
 
 class ScaleAnalyzeBody(serializers.Serializer):
-    left = serializers.FloatField()
-    top = serializers.FloatField()
-    right = serializers.FloatField()
-    bottom = serializers.FloatField()
+    region = serializers.ListField(
+        child=serializers.DictField(child=serializers.FloatField()),
+        min_length=3,  # polygon requires at least 3 points
+        help_text="Array of coordinate objects with x and y properties"
+    )
+
+    def validate_region(self, value):
+        """Validate that region contains valid coordinate objects"""
+        if not value:
+            raise serializers.ValidationError("Region cannot be empty")
+
+        for i, point in enumerate(value):
+            if not isinstance(point, dict):
+                raise serializers.ValidationError(f"Point {i} must be an object")
+            if "x" not in point or "y" not in point:
+                raise serializers.ValidationError(f"Point {i} must have 'x' and 'y' properties")
+            if not isinstance(point["x"], (int, float)) or not isinstance(point["y"], (int, float)):
+                raise serializers.ValidationError(f"Point {i} coordinates must be numbers")
+
+        return value
 
 
 @api_view(["POST"])
@@ -889,7 +907,7 @@ class ScaleAnalyzeBody(serializers.Serializer):
 def analyze_page_scale(request, page_id: int):
     """
     URL:  /pages/<page_id>/scale/analyze/
-    Body: { "left": 2100, "top": 2520, "right": 3200, "bottom": 2640 }
+    Body: { "region": [{"x": 2100, "y": 2520}, {"x": 3200, "y": 2640}, ...] }
     Query params (optional):
       - legend_total_length=100
       - min_line_length=50
@@ -897,13 +915,14 @@ def analyze_page_scale(request, page_id: int):
       - debug=true|false
       - save_overlay=true|false
     Behavior:
-      - crop (no resize)
+      - validate polygon points (at least one inside image)
+      - crop bounding box of polygon (clamped to image bounds)
       - run local ScaleBarService
       - return JSON + tmp crop path/url (+ optional overlay)
     """
     s = ScaleAnalyzeBody(data=request.data)
     s.is_valid(raise_exception=True)
-    v = s.validated_data
+    region = s.validated_data["region"]
 
     # Parse optional query params
     qp = request.query_params
@@ -919,7 +938,7 @@ def analyze_page_scale(request, page_id: int):
 
     pg = get_object_or_404(PageImage, pk=page_id)
 
-    # Open and crop
+    # Open the page image
     try:
         im = Image.open(pg.image.path).convert("RGB")
     except Exception as e:
@@ -929,19 +948,41 @@ def analyze_page_scale(request, page_id: int):
         )
 
     W, H = im.size
-    x0 = max(0, min(int(round(v["left"])),  W - 1))
-    y0 = max(0, min(int(round(v["top"])),   H - 1))
-    x1 = max(0, min(int(round(v["right"])), W))
-    y1 = max(0, min(int(round(v["bottom"])),H))
-    if x1 <= x0 or y1 <= y0:
+
+    # --- Validate polygon points: at least one point must be inside image ---
+    inside_count = 0
+    for i, point in enumerate(region):
+        if 0 <= point["x"] <= W and 0 <= point["y"] <= H:
+            inside_count += 1
+
+    if inside_count == 0:
         return Response(
-            {"detail": "Invalid crop box (right>left and bottom>top required)."},
+            {"detail": f"All polygon points are outside page bounds (0,0) to ({W},{H})"},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    # --- Compute bounding box from polygon ---
+    xs = [p["x"] for p in region]
+    ys = [p["y"] for p in region]
+    left, right = min(xs), max(xs)
+    top, bottom = min(ys), max(ys)
+
+    if right <= left or bottom <= top:
+        return Response(
+            {"detail": "Invalid polygon region (bounding box width and height must be > 0)."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # --- Clamp bounding box to image bounds ---
+    x0 = max(0, min(int(round(left)), W - 1))
+    y0 = max(0, min(int(round(top)), H - 1))
+    x1 = max(0, min(int(round(right)), W))
+    y1 = max(0, min(int(round(bottom)), H))
+
+    # --- Crop image ---
     crop = im.crop((x0, y0, x1, y1))
 
-    # Save the crop under MEDIA (optional but you did this already)
+    # Save cropped image to MEDIA
     crop_buf = BytesIO()
     crop.save(crop_buf, format="PNG")
     crop_buf.seek(0)
@@ -959,6 +1000,7 @@ def analyze_page_scale(request, page_id: int):
 
     # ---- Run local analysis service
     try:
+        print(f"[DEBUG] Crop size: {crop.size}, Polygon region: {region}")
         result = ScaleBarService.analyze_pil(crop, req=req)
     except Exception as e:
         return Response(
@@ -966,7 +1008,7 @@ def analyze_page_scale(request, page_id: int):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
-    # Optional: draw and save overlay if we found a line
+    # Optional overlay
     overlay_path = None
     overlay_url = None
     if save_overlay and result.get("longest_line_coords"):
@@ -982,7 +1024,6 @@ def analyze_page_scale(request, page_id: int):
                 except Exception:
                     overlay_url = None
         except Exception:
-            # non-fatal; just skip overlay
             pass
 
     payload = {
@@ -992,9 +1033,10 @@ def analyze_page_scale(request, page_id: int):
         "overlay_file_path": overlay_path,
         "overlay_file_url": overlay_url,
         "crop_box": {"left": x0, "top": y0, "right": x1, "bottom": y1},
+        "polygon_region": region,
     }
 
-    # Map enum status to sensible HTTP codes
+    # Map enum status to HTTP codes
     status_map = {
         "success": status.HTTP_200_OK,
         str(LineStatus.NO_LINES_FOUND.value): status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -1395,5 +1437,236 @@ def delete_multiple_polygons(request, workspace_id, page_id):
     except Exception as e:
         return Response(
             {"detail": f"Failed to delete polygons: {str(e)}"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def analyze_region(request, workspace_id, page_id):
+    """
+    Analyze a specific region of a page image for polygon extraction.
+
+    Expected payload:
+    {
+        "region": [[x1, y1], [x2, y2], ...],  // Array of coordinate pairs
+        "segmentation_method": str,
+        "dpi": int
+    }
+
+    Stores region as: [{"x": x1, "y": y1}, {"x": x2, "y": y2}, ...]
+    """
+    try:
+        region = request.data.get("region")
+        segmentation_method = request.data.get("segmentation_method", "GENERIC")
+        dpi = request.data.get("dpi", 100)
+
+        if not region:
+            return Response(
+                {"detail": "Missing required field: region"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not isinstance(region, list) or len(region) < 2:
+            return Response(
+                {"detail": "Region must be an array with at least 2 coordinate pairs"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        for i, coord in enumerate(region):
+            if not isinstance(coord, list) or len(coord) != 2:
+                return Response(
+                    {"detail": f"Coordinate pair {i} must be [x, y] format"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            try:
+                float(coord[0])  # x coordinate
+                float(coord[1])  # y coordinate
+            except (ValueError, TypeError):
+                return Response(
+                    {"detail": f"Coordinate pair {i} must contain valid numbers"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        region_objects = [{"x": coord[0], "y": coord[1]} for coord in region]
+
+        workspace = get_object_or_404(Workspace, id=workspace_id, user=request.user)
+        page_image = get_object_or_404(PageImage, workspace=workspace, id=page_id)
+
+        # Store region data
+        page_image.analyze_region = region_objects  # Store as array of objects
+        page_image.segmentation_choice = segmentation_method
+        page_image.dpi = dpi
+        page_image.extract_status = ExtractStatus.QUEUED  # Set to QUEUED for processing
+        page_image.save()
+
+        rect_points = []
+        if len(region_objects) >= 2:
+            # For rectangle regions, use first and last points to create bounding box
+            if segmentation_method == "GENERIC":
+                x_coords = [point["x"] for point in region_objects]
+                y_coords = [point["y"] for point in region_objects]
+                rect_points = [
+                    {"x": min(x_coords), "y": min(y_coords)},
+                    {"x": max(x_coords), "y": min(y_coords)},
+                    {"x": max(x_coords), "y": max(y_coords)},
+                    {"x": min(x_coords), "y": max(y_coords)}
+                ]
+            else:
+                # For contoured regions, use all points
+                rect_points = region_objects
+
+        # Trigger the page processing task asynchronously
+        try:
+            # Prepare region data for the task
+            region_data = {
+                "region": region_objects,
+                "segmentation_method": segmentation_method,
+                "dpi": dpi
+            }
+
+            # Start the task asynchronously (like process_workspace_task)
+            task = simple_page_process_task.delay(
+                workspace_id=workspace_id,
+                page_id=page_id,
+                region_data=region_data,
+                verbose=True
+            )
+
+            # Store the task in the database using the model method
+            page_image.set_task(task)
+
+            print(f"Started simple_page_process_task with ID: {task.id}")
+
+        except Exception as task_error:
+            print(f"Failed to start simple_page_process_task: {task_error}")
+            # Update status to failed if task couldn't be started
+            with transaction.atomic():
+                page_image.extract_status = ExtractStatus.FAILED
+                page_image.save()
+
+        return Response({
+            "detail": "Region analysis started",
+            "workspace_id": workspace_id,
+            "page_id": page_id,
+            "region": region_objects,  # Return stored object format
+            "segmentation_method": segmentation_method,
+            "dpi": dpi,
+            "task_started": True,
+            "task_id": task.id if 'task' in locals() else None
+        }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        return Response(
+            {"detail": f"Failed to start region analysis: {str(e)}"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+
+@api_view(["PATCH"])
+@permission_classes([IsAuthenticated])
+def update_page_status(request, workspace_id, page_id):
+    """
+    Update the extract status of a page.
+
+    Expected payload:
+    {
+        "extract_status": "queued" | "processing" | "finished" | "failed" | "canceled"
+    }
+    """
+    try:
+        extract_status = request.data.get("extract_status")
+
+        if not extract_status:
+            return Response(
+                {"detail": "Missing required field: extract_status"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Validate status
+        valid_statuses = [choice[0] for choice in ExtractStatus.choices]
+        if extract_status not in valid_statuses:
+            return Response(
+                {"detail": f"Invalid extract_status. Must be one of: {valid_statuses}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Get workspace and page image
+        workspace = get_object_or_404(Workspace, id=workspace_id, user=request.user)
+        page_image = get_object_or_404(PageImage, workspace=workspace, id=page_id)
+
+        # Update status
+        page_image.extract_status = extract_status
+        page_image.save()
+
+        return Response({
+            "detail": "Page status updated successfully",
+            "workspace_id": workspace_id,
+            "page_id": page_id,
+            "extract_status": extract_status
+        }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        return Response(
+            {"detail": f"Failed to update page status: {str(e)}"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def cancel_region_analysis(request, workspace_id, page_id):
+    """
+    Cancel a region analysis task that is currently queued or processing.
+
+    This endpoint:
+    1. Validates that the task is in a cancellable state (queued or processing)
+    2. Updates the status to canceled
+    3. Clears the analysis region data
+    4. Optionally cancels any running Celery tasks
+    """
+    try:
+        # Get workspace and page image
+        workspace = get_object_or_404(Workspace, id=workspace_id, user=request.user)
+        page_image = get_object_or_404(PageImage, workspace=workspace, id=page_id)
+
+        # Check if task is in a cancellable state
+        if page_image.extract_status not in [ExtractStatus.QUEUED, ExtractStatus.PROCESSING]:
+            return Response(
+                {
+                    "detail": f"Cannot cancel task with status '{page_image.extract_status}'. Only 'queued' or 'processing' tasks can be canceled."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Update status to canceled and clear region data atomically
+        with transaction.atomic():
+            page_image.extract_status = ExtractStatus.CANCELED
+            page_image.analyze_region = None  # Clear region data
+            page_image.save()
+
+        # Cancel the Celery task using the model method
+        if page_image.task_id:
+            success = page_image.cancel_task()
+            if success:
+                print(f"[CANCEL] Successfully canceled task for page {page_id}")
+            else:
+                print(f"[CANCEL] Failed to cancel task for page {page_id}")
+
+            # Clear the task ID
+            page_image.clear_task()
+        else:
+            print(f"[CANCEL] No task ID found for page {page_id}")
+
+        return Response({
+            "detail": "Region analysis canceled successfully",
+            "workspace_id": workspace_id,
+            "page_id": page_id,
+            "extract_status": ExtractStatus.CANCELED
+        }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        return Response(
+            {"detail": f"Failed to cancel region analysis: {str(e)}"},
             status=status.HTTP_400_BAD_REQUEST,
         )

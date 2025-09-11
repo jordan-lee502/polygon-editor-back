@@ -18,6 +18,7 @@ class WorkspaceSerializer(serializers.ModelSerializer):
     # Derived fields
     is_ready = serializers.BooleanField(read_only=True)
     page_counts = serializers.SerializerMethodField()
+    processing_counts = serializers.SerializerMethodField()
     summary_status = serializers.SerializerMethodField()  # one badge to rule them all
 
     default_scale_ratio = serializers.DecimalField(
@@ -47,6 +48,7 @@ class WorkspaceSerializer(serializers.ModelSerializer):
             "is_ready",
             # helpful extras
             "page_counts",
+            "processing_counts",
             "summary_status",
             "created_at",
             "updated_at",
@@ -58,6 +60,7 @@ class WorkspaceSerializer(serializers.ModelSerializer):
             "updated_at",
             "is_ready",
             "page_counts",
+            "processing_counts",
             "summary_status",
             "status_label",
             "pipeline_state_label",
@@ -70,6 +73,14 @@ class WorkspaceSerializer(serializers.ModelSerializer):
         total = qs.count()
         scaled = qs.filter(scale_ratio__isnull=False, scale_unit__isnull=False).count()
         return {"total": total, "scaled": scaled, "unscaled": total - scaled}
+
+    def get_processing_counts(self, obj: Workspace):
+        from .models import ExtractStatus
+        qs = obj.pages.all()  # tip: prefetch in your view to avoid N+1
+        total = qs.count()
+        queued = qs.filter(extract_status=ExtractStatus.QUEUED).count()
+        processing = qs.filter(extract_status=ExtractStatus.PROCESSING).count()
+        return {"total": total, "queued": queued, "processing": processing}
 
     def get_summary_status(self, obj: Workspace):
         """
@@ -126,6 +137,10 @@ class PageImageSerializer(serializers.ModelSerializer):
             "scale_bar_crop_path",
             "scale_bar_crop_url",
             "scale_bar_line_coords",
+            "analyze_region",
+            "dpi",
+            "extract_status",
+            "segmentation_choice",
         ]
 
     def get_scale_bar_crop_url(self, obj):
