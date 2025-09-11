@@ -67,5 +67,8 @@ urlpatterns = [
     ),
     path("pages/<int:page_id>/scale/", views.patch_page_scale, name="page-scale"),
     path("pages/<int:page_id>/scale/analyze/", views.analyze_page_scale, name="page-scale-analyze"),
+    path("workspaces/<int:workspace_id>/pages/<int:page_id>/analyze-region/", views.analyze_region, name="analyze-region"),
+    path("workspaces/<int:workspace_id>/pages/<int:page_id>/status/", views.update_page_status, name="update-page-status"),
+    path("workspaces/<int:workspace_id>/pages/<int:page_id>/cancel-analysis/", views.cancel_region_analysis, name="cancel-region-analysis"),
     path("uploads/", include("uploads.urls")),
 ]

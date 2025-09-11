@@ -70,6 +70,19 @@ class SyncStatus(models.TextChoices):
     FAILED     = "failed", "Failed"
     SUCCESS    = "success", "Success"
 
+class ExtractStatus(models.TextChoices):
+    NONE       = "none", "None"
+    QUEUED     = "queued", "Queued"
+    PROCESSING = "processing", "Processing"
+    FAILED     = "failed", "Failed"
+    FINISHED   = "finished", "Finished"
+    CANCELED   = "canceled", "Canceled"
+
+class SegmentationChoice(models.TextChoices):
+    NONE       = "none", "None"
+    GENERIC    = "generic", "Generic"
+    CUSTOM     = "contoured", "Contoured"
+
 # ---------- Workspace ----------
 
 
@@ -144,6 +157,8 @@ class Workspace(models.Model):
         default=SyncStatus.PENDING,
         db_index=True,
     )
+
+    auto_extract_on_upload = models.BooleanField(default=False)
 
     class Meta:
         indexes = [
@@ -237,6 +252,31 @@ class PageImage(models.Model):
     scale_bar_crop_path    = models.CharField(max_length=1024, null=True, blank=True)
     scale_bar_line_coords  = models.JSONField(null=True, blank=True)
 
+    analyze_region = models.JSONField(null=True, blank=True)
+    dpi = models.IntegerField(null=True, blank=True)
+
+    extract_status = models.CharField(
+        max_length=16,
+        choices=ExtractStatus.choices,
+        default=ExtractStatus.NONE,
+        db_index=True,
+    )
+
+    segmentation_choice = models.CharField(
+        max_length=16,
+        choices=SegmentationChoice.choices,
+        default=SegmentationChoice.NONE,
+        db_index=True,
+    )
+
+    task_id = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        help_text="Celery task ID for tracking and cancellation"
+    )
+
+
     class Meta:
         unique_together = (("workspace", "page_number"),)
         indexes = [
@@ -257,6 +297,41 @@ class PageImage(models.Model):
     def needs_sync(self) -> bool:
         # True if never synced, or changes after last sync
         return self.synced_at is None or (self.updated_at and self.synced_at and self.updated_at > self.synced_at)
+
+    def set_task(self, task):
+        """Store Celery task instance and its ID in the database"""
+        self.task_id = task.id
+        self.save(update_fields=['task_id'])
+        return task
+
+    def get_task(self):
+        """Get Celery task instance from stored task ID"""
+        if not self.task_id:
+            return None
+        try:
+            from celery import current_app
+            return current_app.AsyncResult(self.task_id)
+        except Exception:
+            return None
+
+    def cancel_task(self):
+        """Cancel the stored Celery task"""
+        task = self.get_task()
+        if task:
+            try:
+                from celery import current_app
+                current_app.control.revoke(self.task_id, terminate=True)
+                print(f"[CANCEL] Revoked Celery task {self.task_id} for page {self.id}")
+                return True
+            except Exception as e:
+                print(f"[CANCEL] Error revoking task {self.task_id}: {e}")
+                return False
+        return False
+
+    def clear_task(self):
+        """Clear the stored task ID"""
+        self.task_id = None
+        self.save(update_fields=['task_id'])
 
 @receiver(post_delete, sender=PageImage)
 def _cleanup_pageimage_file(sender, instance, **kwargs):

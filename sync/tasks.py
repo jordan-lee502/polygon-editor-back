@@ -108,6 +108,7 @@ def sync_workspace_tree_tto_task(
 def sync_updated_pages_and_polygons_tto_task(
     self,
     workspace_id: int,
+    page_id: Optional[int] = None,
     project_name_field: str = "name",
     project_file_link_field: Optional[str] = None,
     actor_email: Optional[str] = None,
@@ -115,10 +116,14 @@ def sync_updated_pages_and_polygons_tto_task(
     verbose: bool = False,
 ) -> None:
     """
-    Celery wrapper around sync.service_tto.sync_updated_pages_and_polygons_tto(...).
+    Celery wrapper around sync.service_tto.sync_workspace_tree_tto(...).
 
     This performs INCREMENTAL sync - only syncs updated pages and polygons,
     not the entire project. Much more efficient than full sync.
+
+    Args:
+        workspace_id: ID of the workspace to sync
+        page_id: Optional specific page ID to sync. If None, syncs all pages.
     """
     ws = Workspace.objects.get(pk=workspace_id)
 
@@ -147,10 +152,14 @@ def sync_updated_pages_and_polygons_tto_task(
         project_file_link_field=project_file_link_field,
         verbose=verbose,
         sync_mode="incremental",
+        page_id=page_id,
     )
 
     if verbose:
-        logger.info("Completed INCREMENTAL TTO sync for Workspace(id=%s)", ws.pk)
+        if page_id:
+            logger.info("Completed INCREMENTAL TTO sync for Workspace(id=%s), Page(id=%s)", ws.pk, page_id)
+        else:
+            logger.info("Completed INCREMENTAL TTO sync for Workspace(id=%s)", ws.pk)
 
 
 @shared_task(
