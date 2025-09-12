@@ -13,7 +13,7 @@ from .models import Workspace, PageImage
 from annotations.models import Polygon
 from .serializers import WorkspaceSerializer, PageImageSerializer
 from annotations.serializers import PolygonSerializer
-from django.db import transaction
+from django.db import transaction, connection
 from django.db.models import Max
 from decimal import Decimal, InvalidOperation
 from rest_framework import serializers, status
@@ -31,6 +31,10 @@ from processing.tasks import process_workspace_task, simple_page_process_task
 from sync.tasks import sync_workspace_tree_tto_task
 from django.utils import timezone
 from datetime import datetime
+import time
+
+from uuid import uuid4
+from io import BytesIO
 
 
 
@@ -884,17 +888,6 @@ def patch_workspace_scale(request, workspace_id: int):
 
 
 
-from uuid import uuid4
-from io import BytesIO
-from PIL import Image
-from django.core.files.base import ContentFile
-from django.core.files.storage import default_storage
-from django.shortcuts import get_object_or_404
-from rest_framework import serializers, status
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.response import Response
-
 # ---- Geometry Helpers ----
 
 def orientation(p, q, r):
@@ -1256,14 +1249,10 @@ def create_multi_polygon(request, workspace_id, page_id):
             print(f"Verifying {len(created_polygons)} polygons were saved...")
 
             # Force a fresh database connection to ensure we see committed data
-            from django.db import connection
             connection.close()
 
-            # Wait a moment for database consistency
-            import time
             time.sleep(0.2)  # Increased delay for better consistency
 
-            # Alternative: Try to refresh the objects from database
             try:
                 for polygon in created_polygons:
                     polygon.refresh_from_db()
