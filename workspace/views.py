@@ -14,6 +14,7 @@ from annotations.models import Polygon
 from .serializers import WorkspaceSerializer, PageImageSerializer
 from annotations.serializers import PolygonSerializer
 from django.db import transaction
+from django.db.models import Max
 from decimal import Decimal, InvalidOperation
 from rest_framework import serializers, status
 from io import BytesIO
@@ -35,7 +36,6 @@ from datetime import datetime
 
 from workspace.models import (
     ExtractStatus,
-    SegmentationChoice,
     ScaleUnit,
 )
 
