@@ -29,12 +29,14 @@ from uuid import uuid4
 from processing.tasks import process_workspace_task, simple_page_process_task
 from sync.tasks import sync_workspace_tree_tto_task
 from django.utils import timezone
+from datetime import datetime
 
 
 
 from workspace.models import (
     ExtractStatus,
     SegmentationChoice,
+    ScaleUnit,
 )
 
 # ---------- helpers ----------
@@ -499,7 +501,7 @@ def export_analysis(request, workspace_id):
         "debug_mode": True,
     }
 
-    timestamp = datetime.now(dt_timezone.utc).isoformat()
+    timestamp = datetime.now(timezone.utc).isoformat()
     page_numbers = sorted({p.page.page_number for p in polygons})
 
     export_data = {
