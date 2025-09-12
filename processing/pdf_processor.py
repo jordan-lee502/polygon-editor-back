@@ -133,7 +133,7 @@ def process_workspace(
         )
         return
 
-    # --- Load PDF
+    # Load PDF
     try:
         mark_step(ws, PipelineStep.LOAD_PDF, progress=5)
         pdf_doc = fitz.open(ws.uploaded_pdf.path)
@@ -163,7 +163,7 @@ def process_workspace(
         for i, page in enumerate(pdf_doc):
             page_fraction = (i + 1) / max(pages_total, 1)
 
-            # === Step 1: Render & derivatives ===
+            # Step 1: Render & derivatives
             mark_step(ws, PipelineStep.RENDER_PAGES, progress=int(30 * page_fraction))
 
             pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x scale
@@ -181,7 +181,7 @@ def process_workspace(
                 },
             )
 
-            # Tiles
+            # Tiles for the page
             page_tile_dir = os.path.join(tiles_root, f"page_{i+1}")
             generate_tiles_pyramid(
                 image_path=page_image.image.path,
@@ -189,7 +189,7 @@ def process_workspace(
                 max_zoom=max_zoom,
             )
 
-            # Full JPEG
+            # Full JPEG image
             full_img_path = os.path.join(full_root, f"page_{i+1}.jpg")
             with Image.open(page_image.image.path) as full_img:
                 full_img.convert("RGB").save(full_img_path, "JPEG", quality=90)
@@ -200,7 +200,7 @@ def process_workspace(
                 img.thumbnail((256, 256), Image.LANCZOS)
                 img.convert("RGB").save(thumb_path, "JPEG", quality=85)
 
-            # === Step 2: Polygon extraction (only if auto_extract_on_upload) ===
+            # Step 2: Polygon extraction (only if auto_extract_on_upload)
             if auto_extract_on_upload:
                 mark_step(ws, PipelineStep.EXTRACT_POLYGONS, progress=50 + int(40 * page_fraction))
 
@@ -257,12 +257,12 @@ def process_workspace(
                     analyze_region={"x1": 0, "y1": 0, "x2": pix.width, "y2": pix.height},
                 )
             else:
-                # Skip polygons, just mark as "no extraction"
+                # Skip polygons, just mark as "no extraction" for the page
                 PageImage.objects.filter(
                     workspace=ws, page_number=i + 1
                 ).update(extract_status=ExtractStatus.NONE)
 
-        # --- Finalize
+        # Finalize
         mark_step(ws, PipelineStep.POSTPROCESS, progress=95)
         mark_succeeded(ws)
         print(f"Workspace {ws.id} processed successfully.")
@@ -277,12 +277,11 @@ def process_pending_workspaces(batch_size: int = 10) -> None:
     Find workspaces that are queued/idle (or failed) and process them.
     Skip soft-deleted by default because of the model manager.
     """
-    # Choose the set you want to re-run; here we take idle/queued/failed (not running/succeeded)
     qs = Workspace.objects.filter(pipeline_state__in=[PipelineState.IDLE, PipelineState.FAILED])[:batch_size]
 
     for ws in qs:
         try:
-            # Advance from queued/idle to running
+            # Advance from queued/idle to running for the workspace
             if ws.pipeline_step == PipelineStep.QUEUED or ws.pipeline_state in (PipelineState.IDLE, PipelineState.FAILED):
                 mark_step(ws, PipelineStep.QUEUED, state=PipelineState.RUNNING, progress=1)
 
@@ -311,7 +310,6 @@ def process_page_region(
     """
     print(f"[!] Processing workspace={ws.id}, page={page_number}, region={rect_points}")
 
-    # Load PDF & page
     try:
         pdf_doc = fitz.open(ws.uploaded_pdf.path)
         page = pdf_doc[page_number - 1]
@@ -319,14 +317,11 @@ def process_page_region(
         print(f"[✗] Failed to load page {page_number}: {e}")
         return
 
-    # Render full page to PNG using DPI
-    # Convert DPI to matrix scale (default DPI is 72, so scale = dpi/72)
     scale = dpi / 100.0
     pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
     buffer = BytesIO(pix.tobytes("png"))
     image_file = ContentFile(buffer.getvalue(), name=f"page_{page_number}.png")
 
-    # Save/update PageImage
     page_image, _ = PageImage.objects.update_or_create(
         workspace=ws,
         page_number=page_number,
@@ -335,12 +330,10 @@ def process_page_region(
 
     full_img_path = page_image.image
 
-    # --- Compute bounding box from rect_points ---
     xs = [pt["x"] for pt in rect_points]
     ys = [pt["y"] for pt in rect_points]
     x1, y1, x2, y2 = min(xs), min(ys), max(xs), max(ys)
 
-    # Crop region
     with Image.open(full_img_path) as im:
         region = im.crop((x1, y1, x2, y2))
         cropped_dir = _media_path("cropped", f"workspace_{ws.id}")
@@ -350,7 +343,7 @@ def process_page_region(
 
     analyze_region = {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
 
-    # --- Call API ---
+    # Call API
     api_url = getattr(settings, "DTI_API_URL", None)
     api_key = getattr(settings, "DTI_API_KEY", None)
     api_headers = {"accept": "application/json"}
@@ -378,24 +371,18 @@ def process_page_region(
             for pattern in patterns:
                 vertices = pattern.get("vertices", [])
 
-                # --- Normalize nested structures ---
-                # Case: [[[x, y], [x, y], ...]] → [[x, y], [x, y], ...]
                 if vertices and isinstance(vertices[0], list):
                     if all(isinstance(v, list) and len(v) == 2 for v in vertices[0]):
-                        # Triple nested case → unwrap one level
                         vertices = vertices[0]
 
                 adjusted_vertices = []
                 for vertex in vertices:
                     if isinstance(vertex, list) and len(vertex) == 2:
-                        # Format: [x, y]
                         x, y = vertex
                         adjusted_vertices.append([x + x1, y + y1])
                     elif isinstance(vertex, dict) and "x" in vertex and "y" in vertex:
-                        # Format: {"x":..,"y":..}
                         adjusted_vertices.append([vertex["x"] + x1, vertex["y"] + y1])
                     else:
-                        # Skip unexpected entries
                         continue
 
                 adjusted_pattern = {
@@ -404,9 +391,6 @@ def process_page_region(
                     "vertices": adjusted_vertices,
                 }
                 adjusted_patterns.append(adjusted_pattern)
-
-            # --- Replace polygons in this region ---
-            # Polygon.objects.filter(workspace=ws, page=page_image).delete()
 
             for pattern in adjusted_patterns:
                 Polygon.objects.create(
@@ -423,7 +407,7 @@ def process_page_region(
     except Exception as api_err:
         print(f"[!] API request failed for page {page_number}: {api_err}")
 
-    # Update PageImage
+    # Update PageImage for the page
     PageImage.objects.filter(id=page_image.id).update(
         extract_status=ExtractStatus.FINISHED,
         segmentation_choice=SegmentationChoice.GENERIC,
