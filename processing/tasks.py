@@ -161,6 +161,7 @@ def simple_page_process_task(
             page_image = PageImage.objects.get(id=page_id, workspace_id=workspace_id)
             page_image.task_id = self.request.id  # Use Celery's task ID
             page_image.save(update_fields=['task_id'])
+            page_image.extract_status = ExtractStatus.QUEUED
             if verbose:
                 print(f"Updated task ID {self.request.id} for page {page_id}")
         except Exception as e:
@@ -189,6 +190,8 @@ def simple_page_process_task(
         # 2) Load the fresh instance after claim
         workspace = Workspace.objects.get(id=workspace_id)
         page_image = PageImage.objects.get(id=page_id, workspace=workspace)
+        page_image.extract_status = ExtractStatus.PROCESSING
+        page_image.save()
 
         # Check if task was canceled after claiming
         if page_image.extract_status == ExtractStatus.CANCELED:
@@ -230,8 +233,8 @@ def simple_page_process_task(
 
         # 4) Update status to finished atomically
         with transaction.atomic():
-            page_image.extract_status = ExtractStatus.FINISHED
             page_image.clear_task()
+            page_image.extract_status = ExtractStatus.FINISHED
             page_image.save()
 
         # 5) Kick off TTO sync for this page

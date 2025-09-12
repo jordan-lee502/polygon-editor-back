@@ -27,6 +27,9 @@ from PIL import Image
 
 from uuid import uuid4
 from processing.tasks import process_workspace_task, simple_page_process_task
+from sync.tasks import sync_workspace_tree_tto_task
+from django.utils import timezone
+
 
 
 from workspace.models import (
@@ -879,6 +882,92 @@ def patch_workspace_scale(request, workspace_id: int):
 
 
 
+from uuid import uuid4
+from io import BytesIO
+from PIL import Image
+from django.core.files.base import ContentFile
+from django.core.files.storage import default_storage
+from django.shortcuts import get_object_or_404
+from rest_framework import serializers, status
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+
+# ---- Geometry Helpers ----
+
+def orientation(p, q, r):
+    """Return orientation of ordered triplet (p,q,r).
+    0 -> collinear, 1 -> clockwise, 2 -> counterclockwise
+    """
+    val = (q["y"] - p["y"]) * (r["x"] - q["x"]) - (q["x"] - p["x"]) * (r["y"] - q["y"])
+    if abs(val) < 1e-9:
+        return 0
+    return 1 if val > 0 else 2
+
+
+def on_segment(p, q, r):
+    """Check if point q lies on line segment 'pr'"""
+    return (min(p["x"], r["x"]) <= q["x"] <= max(p["x"], r["x"]) and
+            min(p["y"], r["y"]) <= q["y"] <= max(p["y"], r["y"]))
+
+
+def segments_intersect(p1, q1, p2, q2):
+    """Check if line segments p1q1 and p2q2 intersect"""
+    o1 = orientation(p1, q1, p2)
+    o2 = orientation(p1, q1, q2)
+    o3 = orientation(p2, q2, p1)
+    o4 = orientation(p2, q2, q1)
+
+    if o1 != o2 and o3 != o4:
+        return True
+
+    # Collinear special cases
+    if o1 == 0 and on_segment(p1, p2, q1): return True
+    if o2 == 0 and on_segment(p1, q2, q1): return True
+    if o3 == 0 and on_segment(p2, p1, q2): return True
+    if o4 == 0 and on_segment(p2, q1, q2): return True
+
+    return False
+
+
+def point_in_polygon(point, polygon):
+    """Ray casting algorithm for point in polygon"""
+    n = len(polygon)
+    inside = False
+    x, y = point["x"], point["y"]
+
+    p1 = polygon[0]
+    for i in range(n + 1):
+        p2 = polygon[i % n]
+        if min(p1["y"], p2["y"]) < y <= max(p1["y"], p2["y"]) and x <= max(p1["x"], p2["x"]):
+            if p1["y"] != p2["y"]:
+                xinters = (y - p1["y"]) * (p2["x"] - p1["x"]) / (p2["y"] - p1["y"]) + p1["x"]
+            if p1["x"] == p2["x"] or x <= xinters:
+                inside = not inside
+        p1 = p2
+    return inside
+
+
+def polygons_overlap(polyA, polyB):
+    """Return True if polygons A and B overlap"""
+    # Step 1: edge intersections
+    for i in range(len(polyA)):
+        for j in range(len(polyB)):
+            if segments_intersect(
+                polyA[i], polyA[(i + 1) % len(polyA)],
+                polyB[j], polyB[(j + 1) % len(polyB)]
+            ):
+                return True
+
+    # Step 2: containment
+    if point_in_polygon(polyA[0], polyB): return True
+    if point_in_polygon(polyB[0], polyA): return True
+
+    return False
+
+
+# ---- Serializer ----
+
 class ScaleAnalyzeBody(serializers.Serializer):
     region = serializers.ListField(
         child=serializers.DictField(child=serializers.FloatField()),
@@ -891,16 +980,23 @@ class ScaleAnalyzeBody(serializers.Serializer):
         if not value:
             raise serializers.ValidationError("Region cannot be empty")
 
+        cleaned = []
         for i, point in enumerate(value):
             if not isinstance(point, dict):
                 raise serializers.ValidationError(f"Point {i} must be an object")
             if "x" not in point or "y" not in point:
                 raise serializers.ValidationError(f"Point {i} must have 'x' and 'y' properties")
-            if not isinstance(point["x"], (int, float)) or not isinstance(point["y"], (int, float)):
-                raise serializers.ValidationError(f"Point {i} coordinates must be numbers")
+            try:
+                x = float(point["x"])
+                y = float(point["y"])
+            except (TypeError, ValueError):
+                raise serializers.ValidationError(f"Point {i} coordinates must be valid numbers")
+            cleaned.append({"x": x, "y": y})
 
-        return value
+        return cleaned
 
+
+# ---- API View ----
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
@@ -908,17 +1004,6 @@ def analyze_page_scale(request, page_id: int):
     """
     URL:  /pages/<page_id>/scale/analyze/
     Body: { "region": [{"x": 2100, "y": 2520}, {"x": 3200, "y": 2640}, ...] }
-    Query params (optional):
-      - legend_total_length=100
-      - min_line_length=50
-      - max_line_gap=10
-      - debug=true|false
-      - save_overlay=true|false
-    Behavior:
-      - validate polygon points (at least one inside image)
-      - crop bounding box of polygon (clamped to image bounds)
-      - run local ScaleBarService
-      - return JSON + tmp crop path/url (+ optional overlay)
     """
     s = ScaleAnalyzeBody(data=request.data)
     s.is_valid(raise_exception=True)
@@ -949,15 +1034,17 @@ def analyze_page_scale(request, page_id: int):
 
     W, H = im.size
 
-    # --- Validate polygon points: at least one point must be inside image ---
-    inside_count = 0
-    for i, point in enumerate(region):
-        if 0 <= point["x"] <= W and 0 <= point["y"] <= H:
-            inside_count += 1
+    # --- Check polygon vs image overlap ---
+    image_polygon = [
+        {"x": 0, "y": 0},
+        {"x": W, "y": 0},
+        {"x": W, "y": H},
+        {"x": 0, "y": H},
+    ]
 
-    if inside_count == 0:
+    if not polygons_overlap(region, image_polygon):
         return Response(
-            {"detail": f"All polygon points are outside page bounds (0,0) to ({W},{H})"},
+            {"detail": f"Polygon does not overlap with page bounds (0,0) to ({W},{H})"},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
@@ -1642,7 +1729,6 @@ def cancel_region_analysis(request, workspace_id, page_id):
         # Update status to canceled and clear region data atomically
         with transaction.atomic():
             page_image.extract_status = ExtractStatus.CANCELED
-            page_image.analyze_region = None  # Clear region data
             page_image.save()
 
         # Cancel the Celery task using the model method
