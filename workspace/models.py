@@ -333,6 +333,29 @@ class PageImage(models.Model):
         self.task_id = None
         self.save(update_fields=['task_id'])
 
+class Tag(models.Model):
+    workspace = models.ForeignKey(
+        Workspace,
+        on_delete=models.CASCADE,
+        related_name="tags",
+        db_index=True
+    )
+    label = models.CharField(max_length=255, db_index=True)
+    color = models.CharField(max_length=7, help_text="Hex color like #RRGGBB")
+    sync_id = models.IntegerField(null=True, blank=True)
+    synced_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = (("workspace", "label"),)
+        indexes = [
+            models.Index(fields=["workspace", "label"]),
+        ]
+
+    def __str__(self):
+        return f"{self.label} ({self.color})"
+
+
 @receiver(post_delete, sender=PageImage)
 def _cleanup_pageimage_file(sender, instance, **kwargs):
     if instance.image and instance.image.name:

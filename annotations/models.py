@@ -1,5 +1,5 @@
 from django.db import models
-from workspace.models import Workspace, PageImage
+from workspace.models import Workspace, PageImage, Tag
 
 
 class Polygon(models.Model):
@@ -79,3 +79,26 @@ class Polygon(models.Model):
     def needs_sync(self) -> bool:
         # True if never synced, or changes after last sync
         return self.synced_at is None or (self.updated_at and self.synced_at and self.updated_at > self.synced_at)
+
+class PolygonTag(models.Model):
+    polygon = models.ForeignKey(
+        Polygon,
+        on_delete=models.CASCADE,
+        related_name="polygon_tags",
+        db_index=True
+    )
+    tag = models.ForeignKey(
+        Tag,
+        on_delete=models.CASCADE,
+        related_name="polygon_tags",
+        db_index=True
+    )
+
+    class Meta:
+        unique_together = (("polygon", "tag"),)
+        indexes = [
+            models.Index(fields=["polygon", "tag"]),
+        ]
+
+    def __str__(self):
+        return f"Polygon {self.polygon_id} ↔ Tag {self.tag.label}"

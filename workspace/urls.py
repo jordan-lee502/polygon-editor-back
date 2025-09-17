@@ -70,5 +70,7 @@ urlpatterns = [
     path("workspaces/<int:workspace_id>/pages/<int:page_id>/analyze-region/", views.analyze_region, name="analyze-region"),
     path("workspaces/<int:workspace_id>/pages/<int:page_id>/status/", views.update_page_status, name="update-page-status"),
     path("workspaces/<int:workspace_id>/pages/<int:page_id>/cancel-analysis/", views.cancel_region_analysis, name="cancel-region-analysis"),
+    path("projects/<int:workspace_id>/tags/", views.workspace_tags, name="workspace-tags"),
+    path("projects/<int:workspace_id>/tags/<int:tag_id>/", views.workspace_tag_detail, name="workspace-tag-detail"),
     path("uploads/", include("uploads.urls")),
 ]
