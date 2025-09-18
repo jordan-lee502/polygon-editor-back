@@ -3,8 +3,8 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 from django.db.models import Q, F
 from django.utils import timezone
-from workspace.models import Workspace, PageImage, SyncStatus
-from annotations.models import Polygon
+from workspace.models import Workspace, PageImage, SyncStatus, Tag
+from annotations.models import Polygon, PolygonTag
 from .api_client_tto import TTOApi
 import uuid
 from utils.urls import to_absolute_media_url
@@ -412,4 +412,120 @@ def sync_workspace_tree_tto(
             sync_status=SyncStatus.FAILED,
         )
         log(f"[ERROR] Sync failed: {e}")
+        raise
+
+def sync_tags_tto(
+    workspace_id: int,
+    api: TTOApi,
+    *,
+    verbose: bool = False,
+):
+    """
+    Sync tags for a given workspace/project with the remote TTO system.
+    - Create missing tags remotely
+    - Update changed tags remotely
+    - Fetch remote list and bind new IDs locally
+    """
+
+    def log(msg: str):
+        if verbose:
+            print(msg)
+
+    # Claim the workspace (same pattern as sync_workspace_tree_tto)
+    claimed = Workspace.objects.filter(pk=workspace_id).filter(
+        ~Q(sync_status=SyncStatus.PROCESSING)
+    )
+    if not claimed:
+        if verbose:
+            try:
+                ws = Workspace.objects.get(pk=workspace_id)
+                log(f"[Skip] Not started: sync_status={ws.sync_status}")
+            except Workspace.DoesNotExist:
+                log("[Skip] Workspace not found")
+        return
+
+    ws = Workspace.objects.get(pk=workspace_id)
+
+    def finish(status: SyncStatus):
+        Workspace.objects.filter(pk=ws.pk).update(
+            sync_status=status,
+            synced_at=timezone.now(),
+        )
+
+    log(f"\n=== TTO TAG SYNC START: Workspace #{ws.id} — '{ws.name}' ===")
+    try:
+        if ws.sync_id is None:
+            log("[Tags] Workspace not bound to remote project yet. Skipping tag sync.")
+            finish(SyncStatus.SUCCESS)  # Don't mark as failed, just skip
+            log("=== TTO TAG SYNC END ===\n")
+            return
+
+        # ---------- Find tags needing sync ----------
+        tags_need_qs = Tag.objects.filter(workspace=ws).filter(
+            Q(sync_id__isnull=True)
+            | Q(synced_at__isnull=True)
+            | Q(updated_at__gt=F("synced_at"))
+        )
+
+        if not tags_need_qs.exists():
+            log("[Tags] No tags need syncing.")
+            finish(SyncStatus.SUCCESS)
+            log("=== TTO TAG SYNC END ===\n")
+            return
+
+        created = updated = bound = 0
+
+        # Get remote tags
+        remote_tags = api.list_tags(ws.sync_id) or []
+        remote_by_label = {
+            str(r.get("label", "")).lower(): r for r in remote_tags if isinstance(r, dict)
+        }
+        log(f"[Tags] Remote tags listed: {len(remote_tags)}")
+
+        # ---------- Process each tag ----------
+        for tag in tags_need_qs.iterator(chunk_size=200):
+            if tag.sync_id is None:
+                # Try to bind by label
+                remote_match = remote_by_label.get(tag.label.lower())
+                if remote_match:
+                    tag.sync_id = int(remote_match["tag_id"])
+                    tag.synced_at = timezone.now()
+                    tag.save(update_fields=["sync_id", "synced_at"])
+                    bound += 1
+                    log(f"[Tags] Bound tag '{tag.label}' -> tag_id={tag.sync_id}")
+                else:
+                    # Create remotely
+                    new_remote = api.create_tag(
+                        project_id=ws.sync_id,
+                        label=tag.label,
+                        color=tag.color,
+                        created_by=getattr(ws, "user", None) and ws.user.email or "system",
+                    )
+                    tag.sync_id = int(new_remote["new_id"])
+                    tag.synced_at = timezone.now()
+                    tag.save(update_fields=["sync_id", "synced_at"])
+                    created += 1
+                    log(f"[Tags] Created tag '{tag.label}' -> tag_id={tag.sync_id}")
+            else:
+                # Update remotely
+                api.update_tag(
+                    tag_id=tag.sync_id,
+                    label=tag.label,
+                    color=tag.color,
+                    modified_by=getattr(ws, "user", None) and ws.user.email or "system",
+                )
+                tag.synced_at = timezone.now()
+                tag.save(update_fields=["synced_at"])
+                updated += 1
+                log(f"[Tags] Updated tag_id={tag.sync_id} ('{tag.label}')")
+
+        finish(SyncStatus.SUCCESS)
+        log(
+            f"[Tags] Completed sync — created={created}, bound={bound}, updated={updated}"
+        )
+        log("=== TTO TAG SYNC END ===\n")
+
+    except Exception as e:
+        Workspace.objects.filter(pk=ws.pk).update(sync_status=SyncStatus.FAILED)
+        log(f"[ERROR] Tag Sync failed: {e}")
         raise

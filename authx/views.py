@@ -165,23 +165,32 @@ class Login(APIView):
             if to_update:
                 user.save(update_fields=to_update)
 
-            # Optionally persist prefs on a profile if you have one
+            # Save preferences to UserProfile
             try:
-                profile = user.profile  # type: ignore[attr-defined]
+                profile = user.profile
                 changed = False
-                if getattr(profile, "language", None) != language:
+                if profile.language != language:
                     profile.language = language
                     changed = True
-                if getattr(profile, "unit_system", None) != unit_system:
+                if profile.unit_system != unit_system:
                     profile.unit_system = unit_system
                     changed = True
-                if getattr(profile, "preferred_mode", None) != theme_mode:
+                if profile.preferred_mode != theme_mode:
                     profile.preferred_mode = theme_mode
                     changed = True
                 if changed:
                     profile.save()
-            except Exception:
-                pass
+                    print(f"Updated preferences for user {user.username}: language={language}, unit_system={unit_system}, preferred_mode={theme_mode}")
+            except Exception as e:
+                # If profile doesn't exist, create it with the preferences
+                from authx.models import UserProfile
+                UserProfile.objects.create(
+                    user=user,
+                    language=language,
+                    unit_system=unit_system,
+                    preferred_mode=theme_mode
+                )
+                print(f"Created new profile for user {user.username}: language={language}, unit_system={unit_system}, preferred_mode={theme_mode}")
 
         # ========= Local bypass path (testing) =========
         else:

@@ -20,6 +20,10 @@ TTO_URLS = {
     "update_polygon": "https://prod-107.westeurope.logic.azure.com:443/workflows/bcba09ce225148f39480b448113fc527/triggers/manual/paths/invoke?api-version=2016-06-01&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=TP92kBPy3saR1IwVCelQ8EP61GXT3hrCxys70k1eMr8",
     "list_polygons_for_page": "https://prod-23.westeurope.logic.azure.com:443/workflows/e96909c0f88c485bb506cc0580545ae7/triggers/manual/paths/invoke?api-version=2016-06-01&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=6fIe1lfGdPzufok-E6x6o3q334s8zDcBnNygfBGk8M4",
     "delete_polygon": "https://6a3cb7afb65948e28f25121cd9bace.bd.environment.api.powerplatform.com/powerautomate/automations/direct/workflows/799c43d162d947b692829904e3b8765b/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=Qr6n-4en16kYPhrxMzYmyXqiv82abTe8_a-nMPflqdA",
+    "create_new_tag": "https://6a3cb7afb65948e28f25121cd9bace.bd.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/9b7471f8b6a64613bfae93e7f7897648/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=Muq6gMjq3lx3gt7NUK4o1Qye-O8-a_DW9yPXQ-2Q87g",
+    "update_new_tag": "https://6a3cb7afb65948e28f25121cd9bace.bd.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/e615aa605c704d9e8ba0907ca08b9571/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=nREKQw5DQH4tH4H52hxw1LUyDDvkExmg3EhATBQ5d30",
+    "list_tags_project" : "https://6a3cb7afb65948e28f25121cd9bace.bd.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/80fc20adc2de4e7ba8b1fe6cdd17f37a/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=aTY-iFclUteFN0XyWrGmSEvGhKGx9Bg7BT0Ymnois4k",
+
     # optional bulk test endpoint
     "bulk_update_polygons": "https://prod-252.westeurope.logic.azure.com:443/workflows/426b3fabf5b7411c80c9be7260921987/triggers/manual/paths/invoke?api-version=2016-06-01&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=IKKLlx4O9Q27u8YXo9Ux35ngA3Z3-0grgCkrbtqeF5I",
     # auth endpoints (if you need them)
@@ -301,6 +305,54 @@ class TTOApi:
             "auth_code": self.auth_code,
         }
         return self._post(TTO_URLS["check_user_access"], payload)
+
+    # ------------ Tags ------------
+    def list_tags(self, project_id: int) -> List[Dict[str, Any]]:
+        """List all tags for a project"""
+        payload = {
+            "project_id": int(project_id),
+            "user_email": self.user_email,
+            "auth_code": self.auth_code,
+        }
+        data = self._post(TTO_URLS["list_tags_project"], payload)
+        # Normalize "no records" shape
+        if isinstance(data, dict) and data.get("message") == "No records found":
+            return []
+        return data or []
+
+    def create_tag(
+        self,
+        project_id: int,
+        label: str,
+        color: str = "#000000",
+        created_by: str = "",
+    ) -> Dict[str, Any]:
+        """Create a new tag"""
+        payload = {
+            "project_id": int(project_id),
+            "label": str(label),
+            "color": str(color),
+            "created_by": created_by or self.actor_email,
+            "auth_code": self.auth_code,
+        }
+        return self._post(TTO_URLS["create_new_tag"], payload)
+
+    def update_tag(
+        self,
+        tag_id: int,
+        label: str,
+        color: str = "#000000",
+        modified_by: str = "",
+    ) -> None:
+        """Update an existing tag"""
+        payload = {
+            "tag_id": int(tag_id),
+            "label": str(label),
+            "color": str(color),
+            "modified_by": modified_by or self.actor_email,
+            "auth_code": self.auth_code,
+        }
+        self._post(TTO_URLS["update_new_tag"], payload)
 
     # in TTOApi
     def _post(

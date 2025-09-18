@@ -9,9 +9,9 @@ from django.core.exceptions import ObjectDoesNotExist
 from django.db.models import Q
 import os
 
-from .models import Workspace, PageImage
-from annotations.models import Polygon
-from .serializers import WorkspaceSerializer, PageImageSerializer
+from .models import Workspace, PageImage, Tag
+from annotations.models import Polygon, PolygonTag
+from .serializers import WorkspaceSerializer, PageImageSerializer, TagSerializer
 from annotations.serializers import PolygonSerializer
 from django.db import transaction, connection
 from django.db.models import Max
@@ -28,7 +28,7 @@ from PIL import Image
 
 from uuid import uuid4
 from processing.tasks import process_workspace_task, simple_page_process_task
-from sync.tasks import sync_workspace_tree_tto_task
+from sync.tasks import sync_workspace_tree_tto_task, sync_tags_tto_task
 from django.utils import timezone
 from datetime import datetime
 import time
@@ -484,10 +484,35 @@ def update_polygon(request, polygon_id):
     if ws.user_id and (ws.user_id != request.user.id) and not request.user.is_staff:
         raise PermissionDenied("You do not have access to this polygon.")
 
+    # Handle tag assignment if tag_id is provided
+    if 'tag_id' in request.data:
+        tag_id = request.data.get('tag_id')
+
+        # Remove all existing tags for this polygon (one tag per polygon for v1)
+        PolygonTag.objects.filter(polygon=polygon).delete()
+
+        # If tag_id is not None/null, assign the new tag
+        if tag_id is not None:
+            try:
+                tag = Tag.objects.get(pk=tag_id, workspace=ws)
+            except Tag.DoesNotExist:
+                return Response({"detail": "Tag not found"}, status=status.HTTP_404_NOT_FOUND)
+
+            # Create new polygon-tag relation
+            PolygonTag.objects.create(
+                polygon=polygon,
+                tag=tag,
+            )
+
+    # Regular polygon update (including tag assignment)
     serializer = PolygonSerializer(polygon, data=request.data, partial=True)
     if serializer.is_valid():
         serializer.save()
-        return Response(serializer.data)
+
+        # Reload polygon to get updated tag information
+        polygon.refresh_from_db()
+        updated_serializer = PolygonSerializer(polygon)
+        return Response(updated_serializer.data)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -1747,3 +1772,60 @@ def cancel_region_analysis(request, workspace_id, page_id):
             {"detail": f"Failed to cancel region analysis: {str(e)}"},
             status=status.HTTP_400_BAD_REQUEST,
         )
+
+
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def workspace_tags(request, workspace_id):
+    """
+    GET  /api/projects/{id}/tags -> list tags
+    POST /api/projects/{id}/tags -> create tag or sync tags
+    """
+
+    ws = _get_workspace_for_user_or_404(request.user, workspace_id)
+
+    if request.method == "GET":
+        tags = Tag.objects.filter(workspace=ws).order_by("label")
+        return Response(TagSerializer(tags, many=True).data)
+
+    if request.method == "POST":
+        try:
+            sync_tags_tto_task.delay(workspace_id=workspace_id)
+        except Exception as e:
+            print(f"Warning: Failed to queue sync task: {str(e)}")
+        serializer = TagSerializer(data=request.data)
+        if serializer.is_valid():
+            tag = serializer.save(workspace=ws)
+            return Response(TagSerializer(tag).data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(["PUT", "DELETE"])
+@permission_classes([IsAuthenticated])
+def workspace_tag_detail(request, workspace_id, tag_id):
+    """
+    PUT    /api/projects/{id}/tags/{tagId} -> update tag or sync tags
+    DELETE /api/projects/{id}/tags/{tagId} -> delete tag
+    """
+
+    ws = _get_workspace_for_user_or_404(request.user, workspace_id)
+
+    try:
+        tag = Tag.objects.get(pk=tag_id, workspace=ws)
+    except Tag.DoesNotExist:
+        return Response({"detail": "Tag not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == "PUT":
+        try:
+            sync_tags_tto_task.delay(workspace_id=workspace_id)
+        except Exception as e:
+            print(f"Warning: Failed to queue sync task: {str(e)}")
+        serializer = TagSerializer(tag, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    if request.method == "DELETE":
+        tag.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)

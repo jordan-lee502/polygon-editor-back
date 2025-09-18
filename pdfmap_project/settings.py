@@ -44,6 +44,7 @@ INSTALLED_APPS = [
     "corsheaders",
     "uploads",
     "sync",
+    "authx",
 ]
 
 MIDDLEWARE = [

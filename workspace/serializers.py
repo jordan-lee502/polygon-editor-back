@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Workspace, PageImage, ProjectStatus
+from .models import Workspace, PageImage, ProjectStatus, Tag
 
 
 class WorkspaceSerializer(serializers.ModelSerializer):
@@ -159,3 +159,8 @@ class PageImageSerializer(serializers.ModelSerializer):
             if not media_url.endswith("/"):
                 media_url += "/"
             return urljoin(media_url, name.lstrip("/"))
+
+class TagSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Tag
+        fields = ["id", "label", "color", "updated_at"]

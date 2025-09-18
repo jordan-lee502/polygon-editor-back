@@ -152,9 +152,7 @@ def simple_page_process_task(
             print(f"Starting simple page processing for workspace {workspace_id}, page {page_id}")
             print(f"Region data: {region_data}")
 
-        # Import here to avoid circular imports
-        from workspace.models import Workspace, PageImage, ExtractStatus
-        from processing.pdf_processor import process_page_region
+
 
         # Update task ID in database at the start of task execution
         try:

@@ -1,10 +1,10 @@
 # authx/serializers.py
 import re
-from django.core.exceptions import ValidationError as DjangoValidationError
-from django.core.validators import validate_email
+# from django.core.exceptions import ValidationError as DjangoValidationError
+# from django.core.validators import validate_email
 from rest_framework import serializers
 
-PHONE_MIN, PHONE_MAX = 10, 15  # digits
+# PHONE_MIN, PHONE_MAX = 10, 15  # digits
 
 
 class SendCodeIn(serializers.Serializer):
@@ -16,21 +16,21 @@ class SendCodeIn(serializers.Serializer):
         value = (attrs.get("user_login") or "").strip()
 
         if medium == "EMAIL":
-            try:
-                validate_email(value)
-            except DjangoValidationError:
-                raise serializers.ValidationError(
-                    {"user_login": "Enter a valid email address."}
-                )
+            # try:
+            #     validate_email(value)
+            # except DjangoValidationError:
+            #     raise serializers.ValidationError(
+            #         {"user_login": "Enter a valid email address."}
+            #     )
             attrs["user_login"] = value.lower()
 
         elif medium == "SMS":
-            # Normalize to digits, then E.164-like (+<10-15 digits>)
+            # Remove phone validation - just normalize to digits
             digits = re.sub(r"\D", "", value)
-            if not (PHONE_MIN <= len(digits) <= PHONE_MAX):
-                raise serializers.ValidationError(
-                    {"user_login": "Enter a valid phone number (10-15 digits)."}
-                )
+            # if not (PHONE_MIN <= len(digits) <= PHONE_MAX):
+            #     raise serializers.ValidationError(
+            #         {"user_login": "Enter a valid phone number (10-15 digits)."}
+            #     )
             attrs["user_login"] = f"{digits}"
 
         return attrs

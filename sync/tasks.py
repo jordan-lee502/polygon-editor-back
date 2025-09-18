@@ -16,7 +16,7 @@ except Exception:  # pragma: no cover
     from workspaces.models import Workspace  # type: ignore
 
 # Your existing service & API client
-from sync.service_tto import sync_workspace_tree_tto
+from sync.service_tto import sync_workspace_tree_tto, sync_tags_tto
 from sync.api_client_tto import TTOApi
 
 
@@ -205,3 +205,65 @@ def dispatch_all_pending_workspace_syncs(limit: int = 50, verbose: bool = False)
         logger.info("Dispatched %s workspace sync(s).", count)
 
     return count
+
+
+@shared_task(
+    bind=True,
+    name="sync.sync_tags_tto_task",
+    queue=getattr(settings, "CELERY_SYNC_QUEUE", "sync"),
+    max_retries=5,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_jitter=True,
+    acks_late=True,
+)
+def sync_tags_tto_task(
+    self,
+    workspace_id: int,
+    user_email: Optional[str] = None,
+    auth_code: Optional[str] = None,
+    actor_email: Optional[str] = None,
+    verbose: bool = False,
+) -> None:
+    """
+    Celery wrapper around sync.service_tto.sync_tags_tto(...).
+
+    Syncs tags for a workspace with the remote TTO system.
+    - Creates missing tags remotely
+    - Updates changed tags remotely
+    - Binds local tags to remote IDs
+    """
+    ws = Workspace.objects.get(pk=workspace_id)
+
+    # Fill emails if not provided
+    user_email = user_email or _resolve_workspace_email(ws)
+    actor_email = actor_email or getattr(settings, "TTO_ACTOR_EMAIL", None) or user_email
+    auth_code = auth_code or getattr(settings, "TTO_AUTH_CODE", None)
+
+    if not auth_code:
+        raise ValueError("TTO_AUTH_CODE must be provided either as parameter or in settings")
+    if not user_email:
+        raise ValueError("user_email must be provided either as parameter or derived from workspace")
+
+    if verbose:
+        logger.info(
+            "Starting TTO tag sync for Workspace(id=%s), actor=%s, user=%s",
+            ws.pk, actor_email, user_email
+        )
+
+    # Construct API client
+    api = TTOApi(
+        auth_code=auth_code,
+        user_email=user_email,
+        actor_email=actor_email,
+    )
+
+    # Call the real service
+    sync_tags_tto(
+        workspace_id=ws.pk,
+        api=api,
+        verbose=verbose,
+    )
+
+    if verbose:
+        logger.info("Completed TTO tag sync for Workspace(id=%s)", ws.pk)
