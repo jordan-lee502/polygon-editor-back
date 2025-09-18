@@ -45,7 +45,7 @@ def reverse_create_user_profiles(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('authx', '0001_initial'),
+        ('authx', '0002_fix_mysql_key_length'),
     ]
 
     operations = [
