@@ -340,7 +340,7 @@ class Tag(models.Model):
         related_name="tags",
         db_index=True
     )
-    label = models.CharField(max_length=255, db_index=True)
+    label = models.CharField(max_length=50, db_index=True)
     color = models.CharField(max_length=7, help_text="Hex color like #RRGGBB")
     sync_id = models.IntegerField(null=True, blank=True)
     synced_at = models.DateTimeField(null=True, blank=True)
@@ -349,7 +349,7 @@ class Tag(models.Model):
     class Meta:
         unique_together = (("workspace", "label"),)
         indexes = [
-            models.Index(fields=["workspace", "label"]),
+            models.Index(fields=["workspace", "label"], name="workspace_tag_ws_label_idx"),
         ]
 
     def __str__(self):

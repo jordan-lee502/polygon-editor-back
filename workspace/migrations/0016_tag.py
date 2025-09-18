@@ -23,7 +23,7 @@ class Migration(migrations.Migration):
                 ('workspace', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='tags', to='workspace.workspace')),
             ],
             options={
-                'indexes': [models.Index(fields=['workspace', 'label'], name='workspace_t_workspa_11f6e8_idx')],
+                'indexes': [models.Index(fields=['workspace', 'label'], name='workspace_tag_ws_label_idx')],
                 'unique_together': {('workspace', 'label')},
             },
         ),
