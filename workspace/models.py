@@ -340,7 +340,7 @@ class Tag(models.Model):
         related_name="tags",
         db_index=True
     )
-    label = models.CharField(max_length=50, db_index=True)
+    label = models.CharField(max_length=100, db_index=True)
     color = models.CharField(max_length=7, help_text="Hex color like #RRGGBB")
     sync_id = models.IntegerField(null=True, blank=True)
     synced_at = models.DateTimeField(null=True, blank=True)
