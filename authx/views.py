@@ -322,6 +322,10 @@ class Me(APIView):
         except Exception:
             profile = None
 
+        print(getattr(profile, "language", None))
+        print(getattr(profile, "unit_system", None))
+        print(getattr(profile, "preferred_mode", None))
+
         def first_non_empty(*vals, default=None):
             for v in vals:
                 if v:
@@ -329,18 +333,18 @@ class Me(APIView):
             return default
 
         language = first_non_empty(
-            claim("lang"),
             getattr(profile, "language", None),
+            claim("lang"),
             default="EN",
         )
         unit_system = first_non_empty(
-            claim("units"),
             getattr(profile, "unit_system", None),
+            claim("units"),
             default="Imperial",
         )
         mode = first_non_empty(
-            claim("theme"),
             getattr(profile, "preferred_mode", None),
+            claim("theme"),
             default="Light",
         )
 
