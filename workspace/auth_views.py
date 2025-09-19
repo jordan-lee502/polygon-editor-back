@@ -2,9 +2,9 @@ from django.contrib.auth.models import User
 from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework import status, permissions
+from rest_framework import  permissions
 from rest_framework_simplejwt.tokens import RefreshToken
-from .auth_serializers import SendCodeIn, LoginIn, LoginOut
+from authx.serializers import SendCodeIn, LoginIn, LoginOut
 from rest_framework_simplejwt.settings import api_settings
 from django.conf import settings
 from django.core.exceptions import ValidationError
