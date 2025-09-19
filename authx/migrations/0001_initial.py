@@ -18,12 +18,12 @@ class Migration(migrations.Migration):
             name='UserProfile',
             fields=[
                 ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('language', models.CharField(default='EN', help_text='User language preference (e.g., EN, ES)', max_length=10)),
-                ('unit_system', models.CharField(default='Imperial', help_text='Unit system preference (Imperial/Metric)', max_length=20)),
-                ('preferred_mode', models.CharField(default='Light', help_text='Theme preference (Light/Dark)', max_length=10)),
+                ('language', models.CharField(default='EN', help_text='User language preference (e.g., EN, ES)', max_length=10, db_index=False)),
+                ('unit_system', models.CharField(default='Imperial', help_text='Unit system preference (Imperial/Metric)', max_length=20, db_index=False)),
+                ('preferred_mode', models.CharField(default='Light', help_text='Theme preference (Light/Dark)', max_length=10, db_index=False)),
                 ('created_at', models.DateTimeField(auto_now_add=True)),
                 ('updated_at', models.DateTimeField(auto_now=True)),
-                ('user', models.OneToOneField(on_delete=django.db.models.deletion.CASCADE, related_name='profile', to=settings.AUTH_USER_MODEL)),
+                ('user', models.OneToOneField(on_delete=django.db.models.deletion.CASCADE, related_name='profile', to=settings.AUTH_USER_MODEL, db_index=True)),
             ],
             options={
                 'verbose_name': 'User Profile',
