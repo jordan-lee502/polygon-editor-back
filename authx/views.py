@@ -110,7 +110,7 @@ class Login(APIView):
             try:
                 if verification_code:
                     tto = check_user_access(
-                        **s.validated_data, verification_code=verification_code
+                        **s.validated_data
                     )
                 else:
                     tto = check_user_access(**s.validated_data)
