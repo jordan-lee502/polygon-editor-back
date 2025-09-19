@@ -4,7 +4,6 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, permissions
 from rest_framework_simplejwt.tokens import RefreshToken
-from authx.models import UserProfile
 from .serializers import SendCodeIn, LoginIn, LoginOut
 from .services.azure_tto import send_access_code, check_user_access, TTOError
 from rest_framework_simplejwt.settings import api_settings
@@ -184,6 +183,7 @@ class Login(APIView):
                     print(f"Updated preferences for user {user.username}: language={language}, unit_system={unit_system}, preferred_mode={theme_mode}")
             except Exception as e:
                 # If profile doesn't exist, create it with the preferences
+                from authx.models import UserProfile
                 UserProfile.objects.create(
                     user=user,
                     language=language,
@@ -316,24 +316,39 @@ class Me(APIView):
             except Exception:
                 return default
 
+        # Prefer JWT claims (set at login), then profile, then defaults
         try:
-            profile = UserProfile.objects.get(user=u)
-            profile_language = profile.language
-            profile_unit_system = profile.unit_system
-            profile_mode = profile.preferred_mode
-            print(f"Found profile for user {u.username}: language={profile_language}, unit_system={profile_unit_system}, preferred_mode={profile_mode}")
-        except UserProfile.DoesNotExist:
-            profile_language = "EN"
-            profile_unit_system = "Imperial"
-            profile_mode = "Light"
-            print(f"No profile found for user {u.username}, using defaults")
+            profile = u.profile  # optional
+        except Exception:
+            profile = None
+
+
+        def first_non_empty(*vals, default=None):
+            for v in vals:
+                if v:
+                    return v
+            return default
+
+        language = first_non_empty(
+            getattr(profile, "language", None),
+            claim("lang"),
+            default="EN",
+        )
+        unit_system = first_non_empty(
+            getattr(profile, "unit_system", None),
+            claim("units"),
+            default="Imperial",
+        )
+        mode = first_non_empty(
+            getattr(profile, "preferred_mode", None),
+            claim("theme"),
+            default="Light",
+        )
 
         # Normalize formatting
-        language = (profile_language or "EN").upper()
-        unit_system = (profile_unit_system or "Imperial").title()  # "Imperial" / "Metric"
-        mode = (profile_mode or "Light").title()  # "Light" / "Dark"
-
-        print(f"Language: {language}, Unit System: {unit_system}, Mode: {mode}")
+        language = (language or "EN").upper()
+        unit_system = (unit_system or "Imperial").title()  # "Imperial" / "Metric"
+        mode = (mode or "Light").title()  # "Light" / "Dark"
 
         full_name = (f"{u.first_name} {u.last_name}").strip()
         name = full_name or getattr(profile, "name", "") or u.get_username()
