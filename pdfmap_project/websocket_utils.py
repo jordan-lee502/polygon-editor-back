@@ -208,7 +208,6 @@ def send_notification_to_job_group(job_id, project_id, title, level='info'):
 
     # Get actual group members from WebSocket groups
     group_name = f"job_{job_id}"
-    print(f"[DEBUG] Looking for job group: {group_name}")
     
     # Check what Redis keys exist
     if redis_client:
@@ -216,21 +215,17 @@ def send_notification_to_job_group(job_id, project_id, title, level='info'):
             # Get all keys that match the pattern
             pattern = f"group_members:job_*"
             all_keys = redis_client.keys(pattern)
-            print(f"[DEBUG] All job group keys in Redis: {all_keys}")
             
             # Check specific key
             specific_key = f"group_members:{group_name}"
             exists = redis_client.exists(specific_key)
-            print(f"[DEBUG] Key {specific_key} exists: {exists}")
             
             if exists:
                 members = redis_client.smembers(specific_key)
-                print(f"[DEBUG] Members in {specific_key}: {members}")
         except Exception as e:
-            print(f"[DEBUG] Error checking Redis keys: {e}")
+            logger.error(f"Error checking Redis keys: {e}")
     
     job_user_ids = get_group_members(group_name)
-    print(f"[DEBUG] Final result for group {group_name}: {job_user_ids}")
 
     if not job_user_ids:
         logger.warning(f"No active users found in job group {group_name}")
@@ -245,15 +240,13 @@ def send_notification_to_job_group(job_id, project_id, title, level='info'):
         user_id=0,  # System notification
         seq=seq,
         ts=int(time.time() * 1000),
-        detail_url=f"/workspaces/{job_id}/",
+        detail_url=f"/workspaces/{project_id}/pages/{job_id}/",
         meta={
             'title': title,
             'level': level,
             'job_id': job_id,
         }
     )
-    print("asdfasdfadsfads", envelope)
-    print("asdddddddddddddddddddddd", job_user_ids)
     # Store notification for each active user in the job group
     notifications = []
     for user_id in job_user_ids:

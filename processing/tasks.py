@@ -253,6 +253,13 @@ def simple_page_process_task(
                 print(f"Task canceled for page {page_id} before processing, exiting early")
             return "Task canceled by user before processing"
 
+        send_notification_to_job_group(
+            job_id=str(page_image.id),
+            project_id=str(workspace.id),
+            title=f"{workspace.name} - Page {page_image.page_number} Analysis Started",
+            level="task_started",
+        )
+
         # 3) Call the actual processing function
         process_page_region(workspace, page_image.page_number, rect_points, segmentation_method, dpi)
 

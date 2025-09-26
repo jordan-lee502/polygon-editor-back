@@ -483,12 +483,12 @@ def process_page_region(
         },
     )
 
-    send_notification_to_job_group(
-        job_id=str(page_image.id),
-        project_id=str(ws.id),
-        title="Polygon Extraction Started",
-        level="task_started",
-    )
+    # send_notification_to_job_group(
+    #     job_id=str(page_image.id),
+    #     project_id=str(ws.id),
+    #     title="Polygon Extraction Started",
+    #     level="task_started",
+    # )
 
     full_img_path = page_image.image
 
@@ -577,7 +577,7 @@ def process_page_region(
                 send_notification_to_job_group(
                     job_id=str(page_image.id),
                     project_id=str(ws.id),
-                    title="Polygon Extraction Failed",
+                    title=f"{ws.name} - Page {page_image.page_number} Analysis Failed",
                     level="error",
                 )
             except Exception as notify_err:
@@ -595,7 +595,7 @@ def process_page_region(
             send_notification_to_job_group(
                 job_id=str(page_image.id),
                 project_id=str(ws.id),
-                title="Polygon Extraction Failed",
+                title=f"{ws.name} - Page {page_image.page_number} Analysis Failed",
                 level="error",
             )
         except Exception as notify_err:
@@ -618,7 +618,7 @@ def process_page_region(
         send_notification_to_job_group(
             job_id=str(page_image.id),
             project_id=str(ws.id),
-            title="Polygon Extraction Complete",
+            title=f"{ws.name} - Page {page_image.page_number} Analysis Complete",
             level="success",
         )
     except Exception as notify_err:
