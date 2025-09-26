@@ -22,8 +22,16 @@ from workspace.models import (
     SegmentationChoice,
 )
 from annotations.models import Polygon
+from pdfmap_project.events.envelope import EventType, JobType
+from pdfmap_project.events.notifier import workspace_event, page_event
+from pdfmap_project.websocket_utils import (
+    send_notification_to_job_group,
+    send_notification_to_project_group
+)
+
 
 # ----------------------------- helpers -----------------------------
+
 
 def _media_path(*parts: str) -> str:
     """Safely build a path under MEDIA_ROOT."""
@@ -34,10 +42,73 @@ def _ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
-def mark_step(ws: Workspace, step: PipelineStep, *, state: PipelineState = PipelineState.RUNNING, progress: int = 0,) -> None:
+def _emit_progress_event(ws: Workspace, step: PipelineStep, progress: int, total_page: int = 0, processing_counts: Dict[str, int] = None, project_status: ProjectStatus = None) -> None:
+    try:
+        payload = {
+            "pipeline_step": step,
+            "pipeline_progress": progress,
+            "pipeline_state": ws.pipeline_state,
+        }
+        
+        # Only include processing_counts if it's not None
+        if processing_counts is not None:
+            payload["processing_counts"] = processing_counts
+            
+        # Only include project_status if it's not None
+        if project_status is not None:
+            payload["project_status"] = project_status.value if hasattr(project_status, 'value') else str(project_status)
+        
+        # Only include total_page if it's greater than 0
+        if total_page > 0:
+            payload["total_page"] = total_page
+            
+        workspace_event(
+            event_type=EventType.TASK_PROGRESS,
+            task_id=str(ws.id),
+            project_id=str(ws.id),
+            user_id=ws.user_id or 0,
+            job_type=JobType.PDF_EXTRACTION,
+            payload=payload,
+            detail_url=f"/api/workspaces/{ws.id}/",
+            workspace_id=str(ws.id),
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[workspace_event] Failed to emit progress for workspace {ws.id}: {exc}")
+
+
+def _emit_progress_job(ws: Workspace, event_type: EventType, page_image: PageImage, page_number: int, extract_status: ExtractStatus) -> None:
+    try:
+        processing_counts = ws.get_processing_counts() if hasattr(ws, 'get_processing_counts') else {"total": 0, "queued": 0, "processing": 0}
+
+        page_event(
+            event_type=event_type,
+            task_id=str(ws.id),
+            project_id=str(ws.id),
+            user_id=ws.user_id,
+            job_type=JobType.POLYGON_EXTRACTION,
+            page_id=page_image.id,
+            page_number=page_number,
+            workspace_id=str(ws.id),
+            payload={
+                "extract_status": extract_status,
+                "processing_counts": processing_counts,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[page_event] Failed to emit progress for workspace {ws.id}: {exc}")
+
+def mark_step(
+    ws: Workspace,
+    step: PipelineStep,
+    *,
+    state: PipelineState = PipelineState.RUNNING,
+    progress: int = 0,
+    total_page: int = 0,
+) -> None:
     ws.pipeline_step = step
     ws.pipeline_state = state
     ws.pipeline_progress = progress
+
     # (optional) mirror legacy status if your UI still reads it
     if state == PipelineState.RUNNING:
         ws.status = "processing"
@@ -47,15 +118,38 @@ def mark_step(ws: Workspace, step: PipelineStep, *, state: PipelineState = Pipel
         ws.status = "failed"
     ws.save(update_fields=["pipeline_step", "pipeline_state", "pipeline_progress", "status"])
 
+    try:
+        processing_counts = ws.get_processing_counts() if hasattr(ws, 'get_processing_counts') else {"total": 0, "queued": 0, "processing": 0}
+    except Exception as e:
+        print(f"Error getting processing counts for workspace {ws.id}: {e}")
+        processing_counts = {"total": 0, "queued": 0, "processing": 0}
 
-def mark_failed(ws: Workspace, step: PipelineStep, *, progress: int = 0, reason: Optional[str] = None) -> None:
+    if state == PipelineState.RUNNING:
+        _emit_progress_event(ws, step, progress, total_page, processing_counts)
+
+
+def mark_failed(ws: Workspace, step: PipelineStep, *, progress: int = 0, reason: Optional[str] = None, total_page: int = 0) -> None:
     ws.pipeline_step = step
     ws.pipeline_state = PipelineState.FAILED
     ws.pipeline_progress = progress
     ws.status = "failed"  # legacy mirror
     ws.save(update_fields=["pipeline_step", "pipeline_state", "pipeline_progress", "status"])
+    try:
+        processing_counts = ws.get_processing_counts() if hasattr(ws, 'get_processing_counts') else {"total": 0, "queued": 0, "processing": 0}
+    except Exception as e:
+        print(f"Error getting processing counts for workspace {ws.id}: {e}")
+        processing_counts = {"total": 0, "queued": 0, "processing": 0}
     if reason:
         print(f"[!] Workspace {ws.id} failed at {step}: {reason}")
+    _emit_progress_event(ws, step, progress, total_page, processing_counts)
+    
+    # Send failure notification to project group
+    send_notification_to_project_group(
+        project_id=str(ws.id),
+        title="PDF extraction Failed",
+        level="error",
+    )
+    
 
 
 def mark_succeeded(ws: Workspace) -> None:
@@ -65,7 +159,30 @@ def mark_succeeded(ws: Workspace) -> None:
     ws.status = "ready"  # legacy mirror
     ws.save(update_fields=["pipeline_step", "pipeline_state", "pipeline_progress", "status"])
     # recompute project readiness (based on per-page scale)
-    ws.recompute_project_status()
+    project_status = ws.recompute_project_status()
+    processing_counts = ws.get_processing_counts()
+    workspace_event(
+        event_type=EventType.TASK_COMPLETED,
+        task_id=str(ws.id),
+        project_id=str(ws.id),
+        user_id=ws.user_id or 0,
+        job_type=JobType.PDF_EXTRACTION,
+        payload={
+            "pipeline_step": PipelineStep.FINISHED,
+            "pipeline_progress": 100,
+            "project_status": project_status,
+            "processing_counts": processing_counts,
+        },
+        detail_url=f"/api/workspaces/{ws.id}/",
+        workspace_id=str(ws.id),
+    )
+    
+    # Send notification to project group
+    send_notification_to_project_group(
+        project_id=str(ws.id),
+        title="PDF extraction Complete",
+        level="success",
+    )
 
 
 # ----------------------------- tiling -----------------------------
@@ -135,13 +252,13 @@ def process_workspace(
 
     # Load PDF
     try:
-        mark_step(ws, PipelineStep.LOAD_PDF, progress=5)
         pdf_doc = fitz.open(ws.uploaded_pdf.path)
+        pages_total = pdf_doc.page_count or 0
+        mark_step(ws, PipelineStep.LOAD_PDF, progress=5, total_page=pages_total)
     except Exception as e:
         mark_failed(ws, PipelineStep.LOAD_PDF, reason=str(e))
         return
 
-    pages_total = pdf_doc.page_count or 0
     print(f"Processing workspace {ws.id} … pages={pages_total}")
 
     # Derivative storage dirs
@@ -161,10 +278,10 @@ def process_workspace(
 
     try:
         for i, page in enumerate(pdf_doc):
-            page_fraction = (i + 1) / max(pages_total, 1)
+            page_fraction = i * 90 / pages_total
 
             # Step 1: Render & derivatives
-            mark_step(ws, PipelineStep.RENDER_PAGES, progress=int(30 * page_fraction))
+            mark_step(ws, PipelineStep.RENDER_PAGES, progress=int(round(30 / pages_total + page_fraction)), total_page=pages_total)
 
             pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x scale
             buffer = BytesIO(pix.tobytes("png"))
@@ -202,7 +319,7 @@ def process_workspace(
 
             # Step 2: Polygon extraction (only if auto_extract_on_upload)
             if auto_extract_on_upload:
-                mark_step(ws, PipelineStep.EXTRACT_POLYGONS, progress=50 + int(40 * page_fraction))
+                mark_step(ws, PipelineStep.EXTRACT_POLYGONS, progress=(round(50 / pages_total + page_fraction)), total_page=pages_total)
 
                 PageImage.objects.filter(
                     workspace=ws, page_number=i + 1
@@ -263,7 +380,7 @@ def process_workspace(
                 ).update(extract_status=ExtractStatus.NONE)
 
         # Finalize
-        mark_step(ws, PipelineStep.POSTPROCESS, progress=95)
+        mark_step(ws, PipelineStep.POSTPROCESS, progress=95, total_page=pages_total)
         mark_succeeded(ws)
         print(f"Workspace {ws.id} processed successfully.")
 
@@ -283,7 +400,7 @@ def process_pending_workspaces(batch_size: int = 10) -> None:
         try:
             # Advance from queued/idle to running for the workspace
             if ws.pipeline_step == PipelineStep.QUEUED or ws.pipeline_state in (PipelineState.IDLE, PipelineState.FAILED):
-                mark_step(ws, PipelineStep.QUEUED, state=PipelineState.RUNNING, progress=1)
+                mark_step(ws, PipelineStep.QUEUED, state=PipelineState.RUNNING, progress=1, total_page=0)
 
             process_workspace(ws, auto_extract_on_upload=ws.auto_extract_on_upload)
         except Exception as e:
@@ -309,12 +426,35 @@ def process_page_region(
     ]
     """
     print(f"[!] Processing workspace={ws.id}, page={page_number}, region={rect_points}")
+    
+    # Import page_event for real-time updates
 
+    
+    page_image = None
+    
     try:
         pdf_doc = fitz.open(ws.uploaded_pdf.path)
         page = pdf_doc[page_number - 1]
     except Exception as e:
         print(f"[✗] Failed to load page {page_number}: {e}")
+        # Send failure event
+        try:
+            page_image = ws.pages.get(page_number=page_number)
+            page_event(
+                event_type=EventType.TASK_FAILED,
+                task_id=str(ws.id),
+                project_id=str(ws.id),
+                user_id=ws.user_id,
+                job_type=JobType.POLYGON_EXTRACTION,
+                page_id=page_image.id,
+                page_number=page_number,
+                workspace_id=str(ws.id),
+                payload={
+                    "extract_status": page_image.extract_status,
+                },
+            )
+        except Exception:
+            pass
         return
 
     scale = dpi / 100.0
@@ -327,6 +467,28 @@ def process_page_region(
         page_number=page_number,
         defaults={"extract_status": ExtractStatus.QUEUED},
     )
+    
+    # Send processing started event
+    page_event(
+        event_type=EventType.TASK_STARTED,
+        task_id=str(ws.id),
+        project_id=str(ws.id),
+        user_id=ws.user_id,
+        job_type=JobType.POLYGON_EXTRACTION,
+        page_id=page_image.id,
+        page_number=page_number,
+        workspace_id=str(ws.id),
+        payload={
+            "extract_status": page_image.extract_status,
+        },
+    )
+
+    # send_notification_to_job_group(
+    #     job_id=str(page_image.id),
+    #     project_id=str(ws.id),
+    #     title="Polygon Extraction Started",
+    #     level="task_started",
+    # )
 
     full_img_path = page_image.image
 
@@ -351,6 +513,9 @@ def process_page_region(
         api_headers["x-api-key"] = api_key
 
     PageImage.objects.filter(id=page_image.id).update(extract_status=ExtractStatus.PROCESSING)
+    
+    # Send processing progress event
+    _emit_progress_job(ws, EventType.TASK_PROGRESS, page_image, page_number, ExtractStatus.PROCESSING)
 
 
     try:
@@ -403,9 +568,39 @@ def process_page_region(
             print(f"[✓] Page {page_number}: stored {len(adjusted_patterns)} polygons in region.")
         else:
             print(f"[✗] API error page {page_number}: {resp.status_code} - {resp.text[:200]}")
+            # Update status to failed and send failure event
+            PageImage.objects.filter(id=page_image.id).update(extract_status=ExtractStatus.FAILED)
+            _emit_progress_job(ws, EventType.TASK_FAILED, page_image, page_number, ExtractStatus.FAILED)
+            
+            # Send failure notification to job group
+            try:
+                send_notification_to_job_group(
+                    job_id=str(page_image.id),
+                    project_id=str(ws.id),
+                    title=f"{ws.name} - Page {page_image.page_number} Analysis Failed",
+                    level="error",
+                )
+            except Exception as notify_err:
+                print(f"Failed to send failure notification: {notify_err}")
+            return
 
     except Exception as api_err:
         print(f"[!] API request failed for page {page_number}: {api_err}")
+        # Update status to failed and send failure event
+        PageImage.objects.filter(id=page_image.id).update(extract_status=ExtractStatus.FAILED)
+        _emit_progress_job(ws, EventType.TASK_FAILED, page_image, page_number, ExtractStatus.FAILED)
+        
+        # Send failure notification to job group
+        try:
+            send_notification_to_job_group(
+                job_id=str(page_image.id),
+                project_id=str(ws.id),
+                title=f"{ws.name} - Page {page_image.page_number} Analysis Failed",
+                level="error",
+            )
+        except Exception as notify_err:
+            print(f"Failed to send failure notification: {notify_err}")
+        return
 
     # Update PageImage for the page
     PageImage.objects.filter(id=page_image.id).update(
@@ -414,3 +609,17 @@ def process_page_region(
         dpi=100,
         analyze_region=analyze_region,
     )
+    
+    # Send processing completed event
+    _emit_progress_job(ws, EventType.TASK_COMPLETED, page_image, page_number, ExtractStatus.FINISHED)
+    
+    # Send notification to job group
+    try:
+        send_notification_to_job_group(
+            job_id=str(page_image.id),
+            project_id=str(ws.id),
+            title=f"{ws.name} - Page {page_image.page_number} Analysis Complete",
+            level="success",
+        )
+    except Exception as notify_err:
+        print(f"Failed to send success notification: {notify_err}")

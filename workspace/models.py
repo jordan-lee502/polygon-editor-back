@@ -83,6 +83,25 @@ class SegmentationChoice(models.TextChoices):
     GENERIC    = "generic", "Generic"
     CUSTOM     = "contoured", "Contoured"
 
+class NotificationType(models.TextChoices):
+    INFO = "info", "Info"
+    SUCCESS = "success", "Success"
+    WARNING = "warning", "Warning"
+    ERROR = "error", "Error"
+    TASK_QUEUED = "task_queued", "Task Queued"
+    TASK_STARTED = "task_started", "Task Started"
+    TASK_PROGRESS = "task_progress", "Task Progress"
+    TASK_COMPLETED = "task_completed", "Task Completed"
+    TASK_FAILED = "task_failed", "Task Failed"
+
+class JobState(models.TextChoices):
+    PENDING = "pending", "Pending"
+    RUNNING = "running", "Running"
+    SUCCESS = "success", "Success"
+    FAILURE = "failure", "Failure"
+    RETRY = "retry", "Retry"
+    REVOKED = "revoked", "Revoked"
+
 # ---------- Workspace ----------
 
 
@@ -215,11 +234,21 @@ class Workspace(models.Model):
             else:
                 self.project_status = ProjectStatus.SCALING_PENDING
         self.save(update_fields=["project_status"])
+        return self.project_status
 
     @property
     def needs_sync(self) -> bool:
         # True if never synced, or changes after last sync
         return self.synced_at is None or (self.updated_at and self.synced_at and self.updated_at > self.synced_at)
+
+    def get_processing_counts(self):
+        """Get processing counts for pages in this workspace"""
+        from .models import ExtractStatus
+        qs = self.pages.all()
+        total = qs.count()
+        queued = qs.filter(extract_status=ExtractStatus.QUEUED).count()
+        processing = qs.filter(extract_status=ExtractStatus.PROCESSING).count()
+        return {"total": total, "queued": queued, "processing": processing}
 
 def fullpage_upload_path(instance, filename):
     ext = os.path.splitext(filename)[1]
@@ -354,6 +383,193 @@ class Tag(models.Model):
 
     def __str__(self):
         return f"{self.label} ({self.color})"
+
+
+# ---------- Notifications ----------
+
+class Notification(models.Model):
+    """User notifications for various events"""
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="notifications",
+        db_index=True
+    )
+    project = models.ForeignKey(
+        Workspace,
+        on_delete=models.CASCADE,
+        related_name="notifications",
+        null=True,
+        blank=True,
+        db_index=True
+    )
+    type = models.CharField(
+        max_length=32,
+        choices=NotificationType.choices,
+        default=NotificationType.INFO,
+        db_index=True
+    )
+    payload_json = models.JSONField(
+        default=dict,
+        help_text="Additional notification data"
+    )
+    link = models.URLField(
+        max_length=500,
+        null=True,
+        blank=True,
+        help_text="Optional link to related resource"
+    )
+    read_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="When the notification was read"
+    )
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        db_index=True
+    )
+
+    class Meta:
+        indexes = [
+            models.Index(
+                fields=["user", "type", "created_at"],
+                name="notif_user_type_idx",
+            ),
+            models.Index(
+                fields=["project", "created_at"],
+                name="notif_project_created_idx",
+            ),
+            models.Index(fields=["created_at"], name="notif_created_idx"),
+            models.Index(
+                fields=["user", "created_at"],
+                name="notif_user_readnull_idx",
+                condition=models.Q(read_at__isnull=True),
+            ),
+        ]
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"Notification {self.id} - {self.type} for {self.user.username}"
+
+    @property
+    def is_read(self):
+        return self.read_at is not None
+
+    def mark_as_read(self):
+        """Mark notification as read"""
+        if not self.is_read:
+            from django.utils import timezone
+            self.read_at = timezone.now()
+            self.save(update_fields=["read_at"])
+
+    def mark_as_unread(self):
+        """Mark notification as unread"""
+        if self.is_read:
+            self.read_at = None
+            self.save(update_fields=["read_at"])
+
+
+# ---------- Job Status ----------
+
+class JobStatus(models.Model):
+    """Track job status and progress for Celery tasks"""
+    task_id = models.CharField(
+        max_length=255,
+        unique=True,
+        db_index=True,
+        help_text="Celery task ID"
+    )
+    state = models.CharField(
+        max_length=16,
+        choices=JobState.choices,
+        default=JobState.PENDING,
+        db_index=True
+    )
+    pct = models.PositiveSmallIntegerField(
+        default=0,
+        help_text="Progress percentage (0-100)"
+    )
+    step = models.CharField(
+        max_length=100,
+        null=True,
+        blank=True,
+        help_text="Current step description"
+    )
+    meta_json = models.JSONField(
+        default=dict,
+        help_text="Additional metadata"
+    )
+    project = models.ForeignKey(
+        Workspace,
+        on_delete=models.CASCADE,
+        related_name="job_statuses",
+        null=True,
+        blank=True,
+        db_index=True
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="job_statuses",
+        null=True,
+        blank=True,
+        db_index=True
+    )
+    seq = models.PositiveIntegerField(
+        default=0,
+        help_text="Monotonic sequence number for ordering"
+    )
+    updated_at = models.DateTimeField(
+        auto_now=True,
+        db_index=True
+    )
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["task_id"]),
+            models.Index(fields=["state", "updated_at"]),
+            models.Index(fields=["user", "state", "updated_at"]),
+            models.Index(fields=["project", "state", "updated_at"]),
+            models.Index(fields=["updated_at"]),
+            models.Index(fields=["task_id", "seq"], name="jobstatus_task_seq_idx"),
+        ]
+        ordering = ["-updated_at"]
+
+    def __str__(self):
+        return f"JobStatus {self.task_id} - {self.state} ({self.pct}%)"
+
+    @property
+    def is_completed(self):
+        return self.state in [JobState.SUCCESS, JobState.FAILURE, JobState.REVOKED]
+
+    @property
+    def is_running(self):
+        return self.state == JobState.RUNNING
+
+    @property
+    def is_pending(self):
+        return self.state == JobState.PENDING
+
+    def update_progress(self, pct, step=None, meta=None):
+        """Update job progress"""
+        self.pct = max(0, min(100, pct))
+        if step is not None:
+            self.step = step
+        if meta is not None:
+            self.meta_json.update(meta)
+        self.save(update_fields=["pct", "step", "meta_json", "updated_at"])
+
+    def set_state(self, state, pct=None, step=None, meta=None):
+        """Set job state and optionally update progress"""
+        self.state = state
+        if pct is not None:
+            self.pct = max(0, min(100, pct))
+        if step is not None:
+            self.step = step
+        if meta is not None:
+            self.meta_json.update(meta)
+        self.save(update_fields=["state", "pct", "step", "meta_json", "updated_at"])
 
 
 @receiver(post_delete, sender=PageImage)

@@ -322,9 +322,6 @@ class Me(APIView):
         except Exception:
             profile = None
 
-        print(getattr(profile, "language", None))
-        print(getattr(profile, "unit_system", None))
-        print(getattr(profile, "preferred_mode", None))
 
         def first_non_empty(*vals, default=None):
             for v in vals:
