@@ -298,6 +298,8 @@ def process_workspace(
                 },
             )
 
+            mark_step(ws, PipelineStep.RENDER_PAGES, progress=int(round(40 / pages_total + page_fraction)), total_page=pages_total)
+
             # Tiles for the page
             page_tile_dir = os.path.join(tiles_root, f"page_{i+1}")
             generate_tiles_pyramid(
