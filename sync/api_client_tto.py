@@ -133,7 +133,6 @@ class TTOApi:
             "created_by": self.actor_email,
             "auth_code": self.auth_code,
         }
-        print(payload)
         data = self._post(TTO_URLS["create_page"], payload)
         return int(data["new_id"])
 

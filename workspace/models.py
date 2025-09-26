@@ -299,7 +299,7 @@ class PageImage(models.Model):
     )
 
     task_id = models.CharField(
-        max_length=255,
+        max_length=20,
         null=True,
         blank=True,
         help_text="Celery task ID for tracking and cancellation"
@@ -475,7 +475,7 @@ class Notification(models.Model):
 class JobStatus(models.Model):
     """Track job status and progress for Celery tasks"""
     task_id = models.CharField(
-        max_length=255,
+        max_length=20,
         unique=True,
         db_index=True,
         help_text="Celery task ID"
