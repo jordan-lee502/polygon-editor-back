@@ -7,5 +7,8 @@ python manage.py enqueue_tto_sync --workspace-id 123 --verbose
 # 6) Sync all workspaces via Django management command
 python manage.py sync_all_workspaces_tto --all
 
-# 7) 
+# 7)
 python manage.py process_pending_workspaces
+
+# 8)
+daphne -b 0.0.0.0 -p 6001 pdfmap_project.asgi:application

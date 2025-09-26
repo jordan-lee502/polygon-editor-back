@@ -38,6 +38,8 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "rest_framework",
+    "channels",
+    "pdfmap_project",  # Add this to make management commands discoverable
     "workspace",
     "processing",
     "annotations",
@@ -203,6 +205,17 @@ CSRF_COOKIE_SECURE = not DEBUG
 
 CELERY_BROKER_URL = config("CELERY_BROKER_URL", "redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = config("CELERY_RESULT_BACKEND", CELERY_BROKER_URL)
+
+# WebSocket Configuration
+ASGI_APPLICATION = "pdfmap_project.asgi.application"
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {
+            "hosts": [("localhost", 6379)],
+        },
+    },
+}
 
 # Safety & behavior
 CELERY_TASK_ACKS_LATE = True

@@ -13,11 +13,16 @@ from django.utils import timezone
 
 # Your pipeline code & enums
 from processing.pdf_processor import (
-    process_workspace as run_processor,   # expects a Workspace instance
+    process_workspace as run_processor,
     process_page_region,
-    mark_step,
     PipelineStep,
     PipelineState,
+)
+from pdfmap_project.events.envelope import EventType, JobType
+from pdfmap_project.events.notifier import workspace_event
+from pdfmap_project.websocket_utils import (
+    send_notification_to_project_group,
+    send_notification_to_job_group
 )
 
 # Workspace model
@@ -102,11 +107,39 @@ def process_workspace_task(
         # 2) Load the fresh instance after claim
         ws = Workspace.objects.get(pk=workspace_id)
 
+        print("start processing workspace", ws.id)
+
         if verbose:
             log.info("Start processing Workspace(%s)", ws.id)
 
-        # 3) Run your existing processor (it manages steps/states internally)
-        run_processor(ws, auto_extract_on_upload=auto_extract_on_upload, max_zoom=(max_zoom if max_zoom is not None else DEFAULT_MAX_ZOOM))
+        workspace_event(
+            event_type=EventType.TASK_STARTED,
+            task_id=str(ws.id),
+            project_id=str(ws.id),
+            user_id=ws.user_id or 0,
+            job_type=JobType.PDF_EXTRACTION,
+            payload={
+                "pipeline_progress": ws.pipeline_progress or 5,
+                "pipeline_step": ws.pipeline_step or PipelineStep.QUEUED,
+            },
+            detail_url=f"/api/workspaces/{ws.id}/",
+            workspace_id=str(ws.id),
+        )
+
+        send_notification_to_project_group(
+            project_id=str(ws.id),
+            title="PDF extraction Started",
+            level="task_started",
+        )
+
+        try:
+            run_processor(
+                ws,
+                auto_extract_on_upload=auto_extract_on_upload,
+                max_zoom=(max_zoom if max_zoom is not None else DEFAULT_MAX_ZOOM),
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise
 
         # 4) Kick off TTO sync for this workspace
         sync_workspace_tree_tto_task.delay(workspace_id=ws.id)
@@ -160,11 +193,8 @@ def simple_page_process_task(
             page_image.task_id = self.request.id  # Use Celery's task ID
             page_image.save(update_fields=['task_id'])
             page_image.extract_status = ExtractStatus.QUEUED
-            if verbose:
-                print(f"Updated task ID {self.request.id} for page {page_id}")
         except Exception as e:
-            if verbose:
-                print(f"Failed to update task ID: {e}")
+            pass
 
         # 1) Atomically claim the page if eligible (similar to process_workspace_task)
         with transaction.atomic():
@@ -211,9 +241,6 @@ def simple_page_process_task(
                     {"x": max(x_coords), "y": max(y_coords)},
                     {"x": min(x_coords), "y": max(y_coords)}
                 ]
-
-        if verbose:
-            print(f"Converted rect_points: {rect_points}")
 
         # Get segmentation method and DPI from region_data
         segmentation_method = region_data.get('segmentation_method', 'GENERIC')
