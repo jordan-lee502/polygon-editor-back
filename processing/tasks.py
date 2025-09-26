@@ -107,8 +107,6 @@ def process_workspace_task(
         # 2) Load the fresh instance after claim
         ws = Workspace.objects.get(pk=workspace_id)
 
-        print("start processing workspace", ws.id)
-
         if verbose:
             log.info("Start processing Workspace(%s)", ws.id)
 

@@ -269,8 +269,6 @@ def workspace_pages(request, workspace_id):
 @permission_classes([IsAuthenticated])
 def workspace_polygons(request, workspace_id):
 
-    print("workspace_polygons")
-    # Ownership check
     ws = _get_workspace_for_user_or_404(request.user, workspace_id)
 
     if request.method == "GET":
@@ -1107,7 +1105,6 @@ def analyze_page_scale(request, page_id: int):
 
     # ---- Run local analysis service
     try:
-        print(f"[DEBUG] Crop size: {crop.size}, Polygon region: {region}")
         result = ScaleBarService.analyze_pil(crop, req=req)
     except Exception as e:
         return Response(
@@ -1197,7 +1194,6 @@ def create_multi_polygon(request, workspace_id, page_id):
         # Test database connection
         try:
             polygon_count = Polygon.objects.count()
-            print(f"Total polygons in database before creation: {polygon_count}")
         except Exception as e:
             print(f"Database connection test failed: {e}")
             return Response(
@@ -1212,15 +1208,12 @@ def create_multi_polygon(request, workspace_id, page_id):
                 validation_errors = []
 
                 for i, polygon_data in enumerate(data):
-                    print(f"DEBUG: Processing polygon {i+1}/{len(data)}")
-                    print(f"DEBUG: Polygon data: {polygon_data}")
 
                     # Validate required fields for each polygon
                     required_fields = ["vertices"]
                     for field in required_fields:
                         if field not in polygon_data:
                             error_msg = f"Polygon {i+1}: Missing required field '{field}'"
-                            print(f"DEBUG: {error_msg}")
                             validation_errors.append(error_msg)
                             continue
 
@@ -1228,13 +1221,11 @@ def create_multi_polygon(request, workspace_id, page_id):
                     if "vertices" in polygon_data:
                         if not polygon_data["vertices"] or len(polygon_data["vertices"]) < 3:
                             error_msg = f"Polygon {i+1}: Must have at least 3 vertices (got {len(polygon_data['vertices']) if polygon_data['vertices'] else 0})"
-                            print(f"DEBUG: {error_msg}")
                             validation_errors.append(error_msg)
                             continue
 
                     # If validation passed, create the polygon
                     try:
-                        print(f"DEBUG: Creating polygon {i+1} with polygon_id {current_polygon_id}")
                         polygon = Polygon.objects.create(
                             workspace_id=ws.id,
                             page=page_obj,
@@ -1247,7 +1238,6 @@ def create_multi_polygon(request, workspace_id, page_id):
 
                         created_polygons.append(polygon)
                         current_polygon_id += 1
-                        print(f"SUCCESS: Created polygon {polygon.polygon_id} with ID {polygon.id}")
 
                     except Exception as e:
                         error_msg = f"Polygon {i+1}: Failed to create - {str(e)}"
@@ -1257,7 +1247,6 @@ def create_multi_polygon(request, workspace_id, page_id):
 
                 # Check if we have any validation errors
                 if validation_errors:
-                    print(f"DEBUG: Found {len(validation_errors)} validation errors:")
                     for error in validation_errors:
                         print(f"  - {error}")
 
@@ -1270,10 +1259,7 @@ def create_multi_polygon(request, workspace_id, page_id):
                     else:
                         print(f"DEBUG: Created {len(created_polygons)} polygons despite {len(validation_errors)} validation errors")
 
-            # Verify all polygons were actually saved (after transaction commits)
-            print(f"Verifying {len(created_polygons)} polygons were saved...")
 
-            # Force a fresh database connection to ensure we see committed data
             connection.close()
 
             time.sleep(0.2)  # Increased delay for better consistency
@@ -1285,18 +1271,15 @@ def create_multi_polygon(request, workspace_id, page_id):
                 print(f"DEBUG: Could not refresh polygons from DB: {e}")
 
             # Additional verification: Check if polygons exist by querying fresh from DB
-            print(f"DEBUG: Performing additional verification by querying fresh polygons...")
             fresh_polygons = Polygon.objects.filter(
                 workspace_id=ws.id,
                 page=page_obj,
                 polygon_id__in=[p.polygon_id for p in created_polygons]
             )
             fresh_polygon_ids = set(fresh_polygons.values_list('polygon_id', flat=True))
-            print(f"DEBUG: Found {len(fresh_polygon_ids)} fresh polygons in database: {list(fresh_polygon_ids)}")
 
             verification_errors = []
             for polygon in created_polygons:
-                print(f"DEBUG: Verifying polygon {polygon.polygon_id} (ID: {polygon.id})")
 
                 # Check if polygon exists in our fresh query results
                 if polygon.polygon_id in fresh_polygon_ids:
@@ -1315,10 +1298,6 @@ def create_multi_polygon(request, workspace_id, page_id):
 
                 if not saved_polygon:
                     error_msg = f"Polygon {polygon.polygon_id} was not saved to database!"
-                    print(f"ERROR: {error_msg}")
-                    print(f"  - Tried to find by ID: {polygon.id}")
-                    print(f"  - Tried to find by polygon_id: {polygon.polygon_id}")
-                    print(f"  - Fresh query found: {fresh_polygon_ids}")
 
                     # Debug: Show what polygons actually exist
                     existing_polygons = Polygon.objects.filter(workspace_id=ws.id, page=page_obj)
@@ -1365,10 +1344,6 @@ def create_multi_polygon(request, workspace_id, page_id):
             print("DEBUG: No polygons created, skipping sync task")
 
         # Summary of what was created
-        print(f"DEBUG: FINAL SUMMARY:")
-        print(f"  - Requested polygons: {len(data)}")
-        print(f"  - Successfully created: {len(created_polygons)}")
-        print(f"  - Failed to create: {len(data) - len(created_polygons)}")
 
         if len(created_polygons) != len(data):
             print(f"WARNING: Only created {len(created_polygons)} out of {len(data)} requested polygons!")
@@ -1749,11 +1724,7 @@ def cancel_region_analysis(request, workspace_id, page_id):
 
         # Cancel the Celery task using the model method
         if page_image.task_id:
-            success = page_image.cancel_task()
-            if success:
-                print(f"[CANCEL] Successfully canceled task for page {page_id}")
-            else:
-                print(f"[CANCEL] Failed to cancel task for page {page_id}")
+            page_image.cancel_task()
 
             # Clear the task ID
             page_image.clear_task()

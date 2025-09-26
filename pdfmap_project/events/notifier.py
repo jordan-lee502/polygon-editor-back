@@ -148,7 +148,6 @@ def page_event(
     Returns:
         NotifyResult with envelope and status
     """
-    print("adfasdfasdfadsfas2222222222222", workspace_id)
     payload = payload or {}
     task_id_str = str(task_id)
     project_id_str = str(project_id)
