@@ -369,9 +369,7 @@ def workspace_page_polygons(request, workspace_id, page_id):
             NOTE: 'page' is NOT required here; the URL scopes it.
     """
 
-    # 1) Ownership / scope checks
     ws = _get_workspace_for_user_or_404(request.user, workspace_id)
-    print("ws Sirius here ddd")
     try:
         page_obj = PageImage.objects.get(id=page_id, workspace_id=ws.id)
     except PageImage.DoesNotExist:
@@ -386,7 +384,7 @@ def workspace_page_polygons(request, workspace_id, page_id):
         ).select_related("page")
         return Response(PolygonSerializer(polys, many=True).data)
 
-    # POST: bulk upsert + delete for *this page only*
+    # POST: bulk upsert + delete
     data = request.data
     if not isinstance(data, list):
         return Response(
@@ -398,7 +396,6 @@ def workspace_page_polygons(request, workspace_id, page_id):
     existing_ids = set(existing_qs.values_list("id", flat=True))
     incoming_ids = {item.get("id") for item in data if item.get("id")}
 
-    # Map for updates
     update_lookup = {item["id"]: item for item in data if item.get("id")}
 
     to_update = []
@@ -407,7 +404,7 @@ def workspace_page_polygons(request, workspace_id, page_id):
     now = timezone.now()
 
     with transaction.atomic():
-        # --- Updates (only those on this page)
+        # --- Updates
         for poly in existing_qs:
             if poly.id in incoming_ids:
                 incoming = update_lookup[poly.id]
@@ -429,14 +426,18 @@ def workspace_page_polygons(request, workspace_id, page_id):
                 to_update, ["polygon_id", "vertices", "total_vertices", "updated_at", "visible"]
             )
 
-        # --- Creates (new polygons for this page)
+        # --- Upserts (create if new, handled in same loop)
         for item in data:
-            if item.get("id"):
-                continue
             verts = item.get("vertices")
             if not isinstance(verts, (list, tuple)):
-                errors.append("Invalid or missing 'vertices' for a new polygon.")
+                errors.append(f"Invalid or missing 'vertices' for item {item.get('id') or '(new)'}")
                 continue
+
+            if item.get("id") and item["id"] in existing_ids:
+                # Already handled in update loop above → skip
+                continue
+
+            # If no id or id not found in this page → create new
             p = Polygon(
                 workspace_id=ws.id,
                 page=page_obj,
@@ -444,8 +445,8 @@ def workspace_page_polygons(request, workspace_id, page_id):
                 vertices=verts,
                 total_vertices=len(verts),
                 visible=item.get("visible", True),
+                updated_at=now,
             )
-            p.updated_at = now
             to_create.append(p)
 
         if to_create:
@@ -454,20 +455,20 @@ def workspace_page_polygons(request, workspace_id, page_id):
         if errors:
             return Response({"detail": errors}, status=status.HTTP_400_BAD_REQUEST)
 
-        # --- Deletes (polygons on this page not present in payload)
+        # --- Deletes
         ids_to_delete = existing_ids - incoming_ids
         if ids_to_delete:
             Polygon.objects.filter(
                 id__in=ids_to_delete, workspace_id=ws.id, page_id=page_obj.id
             ).delete()
 
-    # Return fresh list for the page
     final_polys = Polygon.objects.filter(workspace_id=ws.id, page_id=page_obj.id)
     sync_workspace_tree_tto_task.delay(workspace_id=ws.id)
 
     return Response(
         PolygonSerializer(final_polys, many=True).data, status=status.HTTP_200_OK
     )
+
 
 
 @api_view(["PATCH"])
