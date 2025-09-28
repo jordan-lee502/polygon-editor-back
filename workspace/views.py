@@ -419,12 +419,13 @@ def workspace_page_polygons(request, workspace_id, page_id):
                 poly.polygon_id = incoming.get("polygon_id", poly.polygon_id)
                 poly.vertices = verts
                 poly.total_vertices = len(verts)
+                poly.visible = incoming.get("visible", poly.visible)
                 poly.updated_at = now
                 to_update.append(poly)
 
         if to_update:
             Polygon.objects.bulk_update(
-                to_update, ["polygon_id", "vertices", "total_vertices", "updated_at"]
+                to_update, ["polygon_id", "vertices", "total_vertices", "updated_at", "visible"]
             )
 
         # --- Creates (new polygons for this page)
@@ -441,6 +442,7 @@ def workspace_page_polygons(request, workspace_id, page_id):
                 polygon_id=item.get("polygon_id"),
                 vertices=verts,
                 total_vertices=len(verts),
+                visible=item.get("visible", True),
             )
             p.updated_at = now
             to_create.append(p)
