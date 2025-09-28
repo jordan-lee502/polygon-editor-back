@@ -371,6 +371,7 @@ def workspace_page_polygons(request, workspace_id, page_id):
 
     # 1) Ownership / scope checks
     ws = _get_workspace_for_user_or_404(request.user, workspace_id)
+    print("ws Sirius here ddd")
     try:
         page_obj = PageImage.objects.get(id=page_id, workspace_id=ws.id)
     except PageImage.DoesNotExist:
@@ -1210,42 +1211,39 @@ def create_multi_polygon(request, workspace_id, page_id):
                 validation_errors = []
 
                 for i, polygon_data in enumerate(data):
-
+                    polygon_valid = True
+                    
                     # Validate required fields for each polygon
-                    required_fields = ["vertices"]
-                    for field in required_fields:
-                        if field not in polygon_data:
-                            error_msg = f"Polygon {i+1}: Missing required field '{field}'"
-                            validation_errors.append(error_msg)
-                            continue
-
-                    # Validate vertices data
-                    if "vertices" in polygon_data:
-                        if not polygon_data["vertices"] or len(polygon_data["vertices"]) < 3:
-                            error_msg = f"Polygon {i+1}: Must have at least 3 vertices (got {len(polygon_data['vertices']) if polygon_data['vertices'] else 0})"
-                            validation_errors.append(error_msg)
-                            continue
-
-                    # If validation passed, create the polygon
-                    try:
-                        polygon = Polygon.objects.create(
-                            workspace_id=ws.id,
-                            page=page_obj,
-                            polygon_id=current_polygon_id,
-                            vertices=polygon_data["vertices"],
-                            total_vertices=len(polygon_data["vertices"]),
-                            name=polygon_data.get("name"),
-                            visible=polygon_data.get("visible", True),
-                        )
-
-                        created_polygons.append(polygon)
-                        current_polygon_id += 1
-
-                    except Exception as e:
-                        error_msg = f"Polygon {i+1}: Failed to create - {str(e)}"
-                        print(f"DEBUG: {error_msg}")
+                    if "vertices" not in polygon_data:
+                        error_msg = f"Polygon {i+1}: Missing required field 'vertices'"
                         validation_errors.append(error_msg)
-                        continue
+                        polygon_valid = False
+                    elif not polygon_data["vertices"] or len(polygon_data["vertices"]) < 3:
+                        error_msg = f"Polygon {i+1}: Must have at least 3 vertices (got {len(polygon_data['vertices']) if polygon_data['vertices'] else 0})"
+                        validation_errors.append(error_msg)
+                        polygon_valid = False
+
+                    # Only create polygon if validation passed
+                    if polygon_valid:
+                        try:
+                            polygon = Polygon.objects.create(
+                                workspace_id=ws.id,
+                                page=page_obj,
+                                polygon_id=current_polygon_id,
+                                vertices=polygon_data["vertices"],
+                                total_vertices=len(polygon_data["vertices"]),
+                                name=polygon_data.get("name"),
+                                visible=polygon_data.get("visible", True),
+                            )
+
+                            created_polygons.append(polygon)
+                            current_polygon_id += 1
+
+                        except Exception as e:
+                            error_msg = f"Polygon {i+1}: Failed to create - {str(e)}"
+                            validation_errors.append(error_msg)
+                    else:
+                        print(f"SKIPPED: Polygon {i+1} due to validation errors")
 
                 # Check if we have any validation errors
                 if validation_errors:
@@ -1261,71 +1259,13 @@ def create_multi_polygon(request, workspace_id, page_id):
                     else:
                         print(f"DEBUG: Created {len(created_polygons)} polygons despite {len(validation_errors)} validation errors")
 
-
-            connection.close()
-
-            time.sleep(0.2)  # Increased delay for better consistency
-
             try:
                 for polygon in created_polygons:
                     polygon.refresh_from_db()
             except Exception as e:
                 print(f"DEBUG: Could not refresh polygons from DB: {e}")
 
-            # Additional verification: Check if polygons exist by querying fresh from DB
-            fresh_polygons = Polygon.objects.filter(
-                workspace_id=ws.id,
-                page=page_obj,
-                polygon_id__in=[p.polygon_id for p in created_polygons]
-            )
-            fresh_polygon_ids = set(fresh_polygons.values_list('polygon_id', flat=True))
-
-            verification_errors = []
-            for polygon in created_polygons:
-
-                # Check if polygon exists in our fresh query results
-                if polygon.polygon_id in fresh_polygon_ids:
-                    print(f"SUCCESS: Polygon {polygon.polygon_id} verified in database (found in fresh query)")
-                    continue
-
-                # Try multiple ways to find the polygon as fallback
-                saved_polygon = Polygon.objects.filter(id=polygon.id).first()
-                if not saved_polygon:
-                    # Try by polygon_id as backup
-                    saved_polygon = Polygon.objects.filter(
-                        workspace_id=ws.id,
-                        page=page_obj,
-                        polygon_id=polygon.polygon_id
-                    ).first()
-
-                if not saved_polygon:
-                    error_msg = f"Polygon {polygon.polygon_id} was not saved to database!"
-
-                    # Debug: Show what polygons actually exist
-                    existing_polygons = Polygon.objects.filter(workspace_id=ws.id, page=page_obj)
-                    print(f"  - Existing polygons for this page: {list(existing_polygons.values_list('polygon_id', flat=True))}")
-
-                    verification_errors.append(error_msg)
-                else:
-                    print(f"SUCCESS: Polygon {polygon.polygon_id} verified in database (ID: {saved_polygon.id})")
-
-            # If we have verification errors, but some polygons were created, continue with partial success
-            if verification_errors:
-                print(f"WARNING: {len(verification_errors)} polygons failed verification:")
-                for error in verification_errors:
-                    print(f"  - {error}")
-
-                # Only return error if NO polygons were successfully verified
-                if len(verification_errors) == len(created_polygons):
-                    return Response(
-                        {"detail": f"Failed to save any polygons to database. Errors: {'; '.join(verification_errors)}"},
-                        status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    )
-                else:
-                    print(f"INFO: Continuing with {len(created_polygons) - len(verification_errors)} successfully verified polygons")
-
         except Exception as e:
-            print(f"ERROR in transaction: {str(e)}")
             return Response(
                 {"detail": f"Error creating polygons: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1356,14 +1296,9 @@ def create_multi_polygon(request, workspace_id, page_id):
             "summary": {
                 "requested": len(data),
                 "created": len(created_polygons),
-                "failed": len(data) - len(created_polygons),
-                "verification_errors": len(verification_errors) if 'verification_errors' in locals() else 0
+                "failed": len(data) - len(created_polygons)
             }
         }
-
-        # Add verification errors to response if any
-        if 'verification_errors' in locals() and verification_errors:
-            response_data["verification_errors"] = verification_errors
 
         return Response(response_data, status=status.HTTP_201_CREATED)
 
