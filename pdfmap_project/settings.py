@@ -206,6 +206,8 @@ CSRF_COOKIE_SECURE = not DEBUG
 CELERY_BROKER_URL = config("CELERY_BROKER_URL", "redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = config("CELERY_RESULT_BACKEND", CELERY_BROKER_URL)
 
+REDIS_URL=config("REDIS_URL", "redis://localhost:6379/1")
+
 # WebSocket Configuration
 ASGI_APPLICATION = "pdfmap_project.asgi.application"
 CHANNEL_LAYERS = {
