@@ -8,13 +8,17 @@ from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
 from django.db.models import Q
 import os
+from django.conf import settings
+import urllib.parse
 
 from .models import Workspace, PageImage, Tag
 from annotations.models import Polygon, PolygonTag
 from .serializers import WorkspaceSerializer, PageImageSerializer, TagSerializer
 from annotations.serializers import PolygonSerializer
+from processing.tasks import add_page_to_workspace_task
 from django.db import transaction, connection
 from django.db.models import Max
+from django.db import models
 from decimal import Decimal, InvalidOperation
 from rest_framework import serializers, status
 from io import BytesIO
@@ -32,6 +36,7 @@ from sync.tasks import sync_workspace_tree_tto_task, sync_tags_tto_task
 from django.utils import timezone
 from datetime import datetime
 import time
+import requests
 
 from uuid import uuid4
 from io import BytesIO
@@ -1802,3 +1807,194 @@ def workspace_tag_detail(request, workspace_id, tag_id):
     if request.method == "DELETE":
         tag.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def add_page_to_workspace(request, workspace_id):
+    """
+    Add a new page to a workspace by uploading an image file.
+    This endpoint queues a Celery task for asynchronous processing.
+    
+    Expected payload:
+    {
+        "file_path": "uploads/filename.jpg",  # Path from uploads API
+        "page_number": 1,  # Optional, will auto-increment if not provided
+        "auto_process": true  # Optional, whether to automatically process the page
+    }
+    """
+    try:
+        print(f"Add page request data: {request.data}")
+        
+        # Get workspace and verify ownership
+        workspace = get_object_or_404(Workspace, id=workspace_id, user=request.user)
+        print(f"Found workspace: {workspace.name} (ID: {workspace.id})")
+        
+        # Get file path from request
+        file_path = request.data.get('file_path')
+        print(f"File path from request: {file_path}")
+        if not file_path:
+            return Response(
+                {"error": "file_path is required"}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Validate file exists
+        print(f"Checking if file exists: {file_path}")
+        if not default_storage.exists(file_path):
+            print(f"File not found: {file_path}")
+            return Response(
+                {"error": "File not found"}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        print(f"File exists: {file_path}")
+        
+        # Get page number (auto-increment if not provided)
+        page_number = request.data.get('page_number')
+        if page_number is None:
+            # Get the next page number
+            max_page = PageImage.objects.filter(workspace=workspace).aggregate(
+                max_page=models.Max('page_number')
+            )['max_page'] or 0
+            page_number = max_page + 1
+        
+        # Check if page number already exists
+        if PageImage.objects.filter(workspace=workspace, page_number=page_number).exists():
+            return Response(
+                {"error": f"Page {page_number} already exists in this workspace"}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        auto_process = request.data.get('auto_process', False)
+        
+        # Get image dimensions first
+        try:
+            with default_storage.open(file_path, 'rb') as f:
+                img = Image.open(f)
+                width, height = img.size
+                print(f"Image dimensions: {width}x{height} for file {file_path}")
+        except Exception as e:
+            print(f"Error opening image {file_path}: {str(e)}")
+            return Response(
+                {"error": f"Invalid image file: {str(e)}"}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Create the page in database first
+        with transaction.atomic():
+            page = PageImage.objects.create(
+                workspace=workspace,
+                page_number=page_number,
+                image=file_path,
+                width=width,
+                height=height,
+                extract_status=ExtractStatus.NONE
+            )
+        
+        # Create thumbnail immediately
+        try:
+          
+            
+            # Create thumbnail directory
+            thumbs_root = os.path.join(settings.MEDIA_ROOT, "thumbnails", f"workspace_{workspace_id}")
+            os.makedirs(thumbs_root, exist_ok=True)
+            
+            # Create thumbnail
+            thumb_path = os.path.join(thumbs_root, f"page_{page_number}.jpg")
+            with default_storage.open(file_path, 'rb') as f:
+                img = Image.open(f)
+                img.thumbnail((256, 256), Image.LANCZOS)
+                img.convert("RGB").save(thumb_path, "JPEG", quality=85)
+            
+            # Thumbnail is created as a file, no need to store in database
+            
+        except Exception as e:
+            print(f"Failed to create thumbnail: {str(e)}")
+            # Don't fail the entire operation if thumbnail creation fails
+        
+        # Queue the Celery task for processing (after DB commit)
+        
+        try:
+            task = add_page_to_workspace_task.delay(
+                workspace_id=workspace_id,
+                file_path=file_path,
+                page_number=page_number,
+                auto_process=auto_process,
+                user_id=request.user.id
+            )
+            print(f"Celery task queued successfully with ID: {task.id}")
+        except Exception as celery_error:
+            print(f"Failed to queue Celery task: {str(celery_error)}")
+            # Don't fail the entire operation if Celery is down
+            task = None
+        
+        # Update page with task ID
+        if task:
+            page.task_id = task.id
+            page.save()
+        
+        # Serialize the created page
+        page_serializer = PageImageSerializer(page)
+        
+        # Return task information immediately
+        return Response({
+            "message": "Page addition queued successfully",
+            "task_id": task.id if task else None,
+            "workspace_id": workspace_id,
+            "page_number": page_number,
+            "auto_process": auto_process,
+            "page": page_serializer.data  # Include the created page data
+        }, status=status.HTTP_202_ACCEPTED)
+        
+    except Exception as e:
+        return Response(
+            {"error": f"Failed to queue page addition: {str(e)}"}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['GET'])
+def fetch_segmentation_methods(request):
+    """
+    Fetch segmentation methods from the DTI API.
+    """
+    try:
+        api_url = getattr(settings, "DTI_API_URL", None)
+        api_key = getattr(settings, "DTI_API_KEY", None)
+        api_headers = {"accept": "application/json"}
+        if api_key:
+            api_headers["x-api-key"] = api_key
+
+        if not api_url:
+            return Response(
+                {"error": "DTI_API_URL not configured"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        cleaned_url = urllib.parse.unquote(api_url)
+        base_url = cleaned_url.split('?')[0] if '?' in cleaned_url else cleaned_url
+        full_url = f"{base_url}/segmentation-methods/get-methods"
+
+        resp = requests.get(
+            url=full_url,
+            headers=api_headers,
+            timeout=30,
+        )
+        
+        print(f"[!] API response: {resp.status_code} - {resp.text[:200]}")
+        
+        resp.raise_for_status()
+        return Response(resp.json())
+
+    except requests.exceptions.RequestException as e:
+        print(f"[!] Request error: {str(e)}")
+        return Response(
+            {"error": f"Failed to fetch segmentation methods: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+    except Exception as e:
+        print(f"[!] Unexpected error: {str(e)}")
+        return Response(
+            {"error": f"Unexpected error: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )

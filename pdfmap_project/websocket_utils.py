@@ -31,16 +31,10 @@ def get_group_members(group_name):
     """Get all user IDs currently in a WebSocket group"""
     try:
         redis_key = f"group_members:{group_name}"
-        print(f"Looking for Redis key: {redis_key}")
         
-        # Get all user IDs from Redis set
         user_ids = redis_client.smembers(redis_key)
         print(f"Raw Redis result: {user_ids}")
-        
-        # Convert from bytes to integers
         result = [int(user_id.decode('utf-8')) for user_id in user_ids]
-        print(f"Group {group_name} has {len(result)} members: {result}")
-        logger.info(f"Group {group_name} has {len(result)} members: {result}")
         return result
     except Exception as e:
         logger.error(f"Failed to get group members for {group_name}: {e}")
@@ -59,10 +53,8 @@ def store_notifications_in_db(notifications):
     for notif in notifications:
         try:
             print(f"Processing notification  to store data for user {notif['user_id']}, project {notif['project_id']}")
-            # Get the user object
             user = User.objects.get(id=notif['user_id'])
             
-            # Get workspace object if project_id is provided
             workspace = None
             if notif['project_id']:
                 workspace = Workspace.objects.get(id=notif['project_id'])
@@ -135,14 +127,12 @@ def send_job_update_to_user(user_id, job_id, status, progress=0, message='', res
         'timestamp': int(time.time() * 1000)
     }
 
-    # Send to user-specific job group
     user_group = f"jobs_{user_id}"
     async_to_sync(channel_layer.group_send)(
         user_group,
         job_data
     )
 
-    # Also send to specific job group (for multiple subscribers)
     job_group = f"job_{job_id}"
     async_to_sync(channel_layer.group_send)(
         job_group,
@@ -161,7 +151,7 @@ def send_polygon_update_to_user(user_id, polygon_id, action, data=None):
     polygon_data = {
         'type': 'polygon_update',
         'polygon_id': polygon_id,
-        'action': action,  # created, updated, deleted
+        'action': action,
         'data': data or {},
         'timestamp': int(time.time() * 1000)
     }
@@ -191,8 +181,6 @@ def broadcast_notification(title, message, level='info', data=None):
         'timestamp': int(time.time() * 1000)
     }
 
-    # Broadcast to all notification groups (this would need to be implemented
-    # with a way to track all active notification groups)
     logger.info(f"Broadcast notification: {title}")
 
 
@@ -204,17 +192,13 @@ def send_notification_to_job_group(job_id, project_id, title, level='info'):
         logger.error("Channel layer not configured")
         return
 
-    # Get actual group members from WebSocket groups
     group_name = f"job_{job_id}"
     
-    # Check what Redis keys exist
     if redis_client:
         try:
-            # Get all keys that match the pattern
             pattern = f"group_members:job_*"
             all_keys = redis_client.keys(pattern)
             
-            # Check specific key
             specific_key = f"group_members:{group_name}"
             exists = redis_client.exists(specific_key)
             
@@ -235,7 +219,7 @@ def send_notification_to_job_group(job_id, project_id, title, level='info'):
         task_id=str(job_id),
         job_type=JobType.POLYGON_EXTRACTION,
         project_id=str(project_id),
-        user_id=0,  # System notification
+        user_id=0,
         seq=seq,
         ts=int(time.time() * 1000),
         detail_url=f"/workspaces/{project_id}/pages/{job_id}/",
@@ -245,25 +229,23 @@ def send_notification_to_job_group(job_id, project_id, title, level='info'):
             'job_id': job_id,
         }
     )
-    # Store notification for each active user in the job group
     notifications = []
     for user_id in job_user_ids:
         notifications.append({
-            'type': 'info',  # Use valid NotificationType   
+            'type': 'info',
             'payload_json': {
                 'title': title,
                 'level': level,
                 'job_id': job_id,
                 'notification_type': 'job_notification'
             },
-            'project_id': None,  # Job notifications don't have project_id
+            'project_id': None,
             'user_id': user_id,
             'link': f"/workspaces/{job_id}/"
         })
 
     store_notifications_in_db(notifications)
 
-    # Send envelope to job group
     envelope_data = envelope.to_dict()
     envelope_data["type"] = "event_message"
     
@@ -282,7 +264,6 @@ def send_notification_to_project_group(project_id, title, level='info'):
         logger.error("Channel layer not configured")
         return
 
-    # Get actual group members from WebSocket groups
     group_name = f"project_{project_id}"
     project_user_ids = get_group_members(group_name)
     
@@ -294,9 +275,9 @@ def send_notification_to_project_group(project_id, title, level='info'):
     envelope = EventEnvelope(
         event_type=EventType.NOTIFICATION,
         task_id=str(project_id),
-        job_type=JobType.PDF_EXTRACTION,  # or appropriate job type
+        job_type=JobType.PDF_EXTRACTION,
         project_id=str(project_id),
-        user_id=0,  # System notification
+        user_id=0,
         seq=seq,
         ts=int(time.time() * 1000),
         detail_url=f"/workspaces/{project_id}/",
@@ -307,11 +288,10 @@ def send_notification_to_project_group(project_id, title, level='info'):
         }
     )
 
-    # Store notification for each active user in the project group
     notifications = []
     for user_id in project_user_ids:
         notifications.append({
-            'type': 'info',  # Use valid NotificationType
+            'type': 'info',
             'payload_json': {
                 'title': title,
                 'level': level,
@@ -323,10 +303,8 @@ def send_notification_to_project_group(project_id, title, level='info'):
             'link': f"/workspaces/{project_id}/"
         })
 
-    # Store in database
     store_notifications_in_db(notifications)
 
-    # Send envelope to project group
     envelope_data = envelope.to_dict()
     envelope_data["type"] = "event_message"
     

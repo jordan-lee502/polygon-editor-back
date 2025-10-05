@@ -72,5 +72,7 @@ urlpatterns = [
     path("workspaces/<int:workspace_id>/pages/<int:page_id>/cancel-analysis/", views.cancel_region_analysis, name="cancel-region-analysis"),
     path("projects/<int:workspace_id>/tags/", views.workspace_tags, name="workspace-tags"),
     path("projects/<int:workspace_id>/tags/<int:tag_id>/", views.workspace_tag_detail, name="workspace-tag-detail"),
+    path("workspaces/<int:workspace_id>/pages/add/", views.add_page_to_workspace, name="add-page-to-workspace"),
     path("uploads/", include("uploads.urls")),
+    path("segmentation-methods/get-methods/", views.fetch_segmentation_methods, name="fetch-segmentation-methods"),
 ]

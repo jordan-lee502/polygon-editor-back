@@ -10,6 +10,7 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/", include("workspace.urls")),
     path("api/auth/", include("authx.urls")),
+    path("uploads/", include("uploads.urls")),
     path("health/redis", health_redis, name="health_redis"),
     path("", index),
     re_path(

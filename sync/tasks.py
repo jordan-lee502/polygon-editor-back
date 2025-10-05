@@ -48,6 +48,8 @@ def _resolve_workspace_email(ws: Workspace) -> Optional[str]:
     retry_backoff=True,   # exponential backoff: 1s, 2s, 4s, ...
     retry_jitter=True,    # add random jitter to reduce thundering herd
     acks_late=True,       # don't ack until the task finishes
+    time_limit=300,        # 5 minutes hard time limit
+    soft_time_limit=240,   # 4 minutes soft time limit
 )
 def sync_workspace_tree_tto_task(
     self,
@@ -63,7 +65,11 @@ def sync_workspace_tree_tto_task(
 
     Pass only IDs/primitive values to Celery (no model instances).
     """
-    ws = Workspace.objects.get(pk=workspace_id)
+    try:
+        ws = Workspace.objects.get(pk=workspace_id)
+    except Workspace.DoesNotExist:
+        logger.warning(f"Workspace {workspace_id} not found, skipping sync")
+        return
 
     # Fill emails if not provided
     user_email = user_email or _resolve_workspace_email(ws)
@@ -80,6 +86,7 @@ def sync_workspace_tree_tto_task(
         auth_code=getattr(settings, "TTO_AUTH_CODE", None),
         user_email=user_email,
         actor_email=actor_email,
+        timeout=120.0,  # Increase timeout to 2 minutes for TTO API calls
     )
 
     # Call the real service
