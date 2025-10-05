@@ -17,6 +17,7 @@ from processing.pdf_processor import (
     process_page_region,
     PipelineStep,
     PipelineState,
+    process_single_image_page,
 )
 from pdfmap_project.events.envelope import EventType, JobType
 from pdfmap_project.events.notifier import workspace_event
@@ -24,6 +25,9 @@ from pdfmap_project.websocket_utils import (
     send_notification_to_project_group,
     send_notification_to_job_group
 )
+
+import os
+
 
 # Workspace model
 from workspace.models import Workspace, PageImage, ExtractStatus
@@ -317,3 +321,104 @@ def dispatch_pending_workspaces(limit: int = 100, verbose: bool = False) -> int:
             log.info("Enqueued processing for Workspace(%s)", ws_id)
 
     return count
+
+
+
+@shared_task(
+    bind=True,
+    name="processing.add_page_to_workspace",
+    queue=PROCESS_QUEUE,
+    max_retries=3,
+    default_retry_delay=60,
+)
+def add_page_to_workspace_task(self, workspace_id: int, file_path: str, page_number: int, auto_process: bool, user_id: int, page_id: int = None):
+    """
+    Process a page that has already been created in the database.
+    
+    Args:
+        workspace_id: ID of the workspace
+        file_path: Path to the uploaded image file
+        page_number: Page number to assign
+        auto_process: Whether to automatically process the page after creation
+        user_id: ID of the user making the request
+        page_id: ID of the already-created page (optional for backward compatibility)
+    """
+    log.info(f"Starting add_page_to_workspace_task: workspace_id={workspace_id}, file_path={file_path}, page_number={page_number}, auto_process={auto_process}, user_id={user_id}")
+    try:
+        # Debug: Print the function signature we're about to call
+        import inspect
+        log.info(f"workspace_event function signature: {inspect.signature(workspace_event)}")
+        # Get workspace and verify ownership
+        log.info(f"Looking for workspace {workspace_id} with user_id {user_id}")
+        workspace = Workspace.objects.get(id=workspace_id, user_id=user_id)
+        log.info(f"Found workspace: {workspace.name}")
+        
+        # Get the existing page
+        if page_id:
+            page = PageImage.objects.get(id=page_id, workspace=workspace)
+        else:
+            # Fallback: find by page number if page_id not provided
+            page = PageImage.objects.get(
+                workspace=workspace, 
+                page_number=page_number
+            )
+        
+        # Validate file exists
+        from django.core.files.storage import default_storage
+        if not default_storage.exists(file_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
+        
+        # Send notification that page was created
+        log.info(f"About to call workspace_event with: event_type={EventType.NOTIFICATION}, task_id={str(page.id)}, project_id={str(workspace_id)}, user_id={user_id}")
+        try:
+            workspace_event(
+                event_type=EventType.NOTIFICATION,
+                task_id=str(page.id),
+                project_id=str(workspace_id),
+                user_id=user_id,
+                job_type=JobType.DATA_PROCESSING,
+                payload={
+                    "page_id": page.id,
+                    "page_number": page.page_number,
+                    "workspace_id": workspace_id,
+                    "title": f"{workspace.name} - Page {page.page_number} Added",
+                    "level": "task_completed",
+                },
+                workspace_id=str(workspace_id),
+            )
+            log.info("workspace_event call successful")
+        except Exception as e:
+            log.error(f"workspace_event call failed: {e}")
+            log.error(f"Function signature: {inspect.signature(workspace_event)}")
+            raise
+        
+        if auto_process:
+            # Call process_single_image_page which handles both image processing and polygon extraction
+            process_single_image_page(workspace, page)
+            
+            workspace_event(
+                event_type=EventType.TASK_STARTED,
+                task_id=str(page.id),
+                project_id=str(workspace_id),
+                user_id=user_id,
+                job_type=JobType.POLYGON_EXTRACTION,
+                payload={
+                    "page_id": page.id,
+                    "page_number": page.page_number,
+                    "workspace_id": workspace_id,
+                    "title": f"{workspace.name} - Page {page.page_number} Analysis Started",
+                    "level": "task_started",
+                },
+                workspace_id=str(workspace_id),
+            )
+        
+        return f"Successfully added page {page.id} to workspace {workspace_id}"
+        
+    except Workspace.DoesNotExist:
+        error_msg = f"Workspace {workspace_id} not found or access denied"
+        log.error(error_msg)
+        raise self.retry(exc=Exception(error_msg), countdown=60)
+        
+    except Exception as exc:
+        log.error(f"Failed to add page to workspace {workspace_id}: {exc}")
+        raise self.retry(exc=exc, countdown=60)

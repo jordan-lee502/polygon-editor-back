@@ -345,7 +345,6 @@ class JobConsumer(BaseWebSocketConsumer):
             'groups': groups,
             'timestamp': self.get_timestamp()
         }
-        print(f"JobConsumer sending response: {response}")
         await self.send(text_data=json.dumps(response))
 
     async def _verify_group_membership(self, group_name):
@@ -362,15 +361,12 @@ class JobConsumer(BaseWebSocketConsumer):
             
             # Send the test message to the group
             await self.channel_layer.group_send(group_name, test_message)
-            print(f"[WS] Sent group membership test message to {group_name}")
             
         except Exception as e:
             print(f"[WS] Failed to verify group membership for {group_name}: {e}")
 
     async def group_membership_test(self, event):
         """Handle group membership test messages"""
-        print(f"[WS] Group membership test received for group {event.get('group_name')}")
-        print(f"[WS] Test message: {event}")
         
         # Send confirmation back to the client
         await self.send(text_data=json.dumps({
@@ -419,7 +415,6 @@ class JobConsumer(BaseWebSocketConsumer):
                 'timestamp': self.get_timestamp()
             }))
             
-            print(f"[WS] User {user_id} groups: {user_groups}")
             
         except Exception as e:
             print(f"[WS] Failed to list user groups: {e}")
@@ -431,7 +426,6 @@ class JobConsumer(BaseWebSocketConsumer):
 
     async def group_check(self, event):
         """Handle group check messages"""
-        print(f"[WS] Group check received for group {event.get('group_name')}")
         # This confirms the user is a member of this group
 
     async def _unsubscribe_from_groups(self, groups):
@@ -462,7 +456,6 @@ class JobConsumer(BaseWebSocketConsumer):
                 for group_name in self.group_memberships:
                     try:
                         redis_client.srem(f"group_members:{group_name}", self.user.id)
-                        print(f"[WS] Removed user {self.user.id} from Redis group {group_name}")
                     except Exception as e:
                         print(f"[WS] Failed to remove user from Redis group {group_name}: {e}")
             
@@ -470,6 +463,6 @@ class JobConsumer(BaseWebSocketConsumer):
             self.group_memberships.clear()
             
         except Exception as e:
-            print(f"[WS] Error during disconnect cleanup: {e}")
+            print(f"[WS] Error during disconnect cleanup: {e}") 
         
         await super().disconnect(close_code)

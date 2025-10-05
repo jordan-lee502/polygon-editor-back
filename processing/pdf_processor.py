@@ -1,6 +1,7 @@
 # processing/pdf_processor.py
 
 import os
+import urllib.parse
 from io import BytesIO
 from typing import Optional, List, Dict
 
@@ -82,7 +83,7 @@ def _emit_progress_job(ws: Workspace, event_type: EventType, page_image: PageIma
 
         page_event(
             event_type=event_type,
-            task_id=str(ws.id),
+            task_id=str(page_image.id),
             project_id=str(ws.id),
             user_id=ws.user_id,
             job_type=JobType.POLYGON_EXTRACTION,
@@ -236,32 +237,55 @@ def process_workspace(
     max_zoom: int = 6,
 ) -> None:
     """
-    Process a single workspace through:
-      1) Image extraction & tiling
+    Process a single workspace (PDF or image) through:
+      1) Page/image rendering and tiling
       2) (Optional) Polygon extraction
-    Updates pipeline state/step/progress and mirrors legacy status.
     """
+    import os
+    import mimetypes
+    import fitz
+    import requests
+    from io import BytesIO
+    from PIL import Image
+    from django.core.files.base import ContentFile
+
     print(f"[!] Workspace {ws.id} is being processed")
 
-    # Only (re)process if idle/failed
+    # Ensure reprocessing only when idle/failed
     if ws.pipeline_state not in (PipelineState.IDLE, PipelineState.FAILED) and ws.pipeline_step != PipelineStep.QUEUED:
-        print(
-            f"Workspace {ws.id} is already in state={ws.pipeline_state}, step={ws.pipeline_step}; skipping."
-        )
+        print(f"Workspace {ws.id} is already in state={ws.pipeline_state}, step={ws.pipeline_step}; skipping.")
         return
 
-    # Load PDF
     try:
-        pdf_doc = fitz.open(ws.uploaded_pdf.path)
-        pages_total = pdf_doc.page_count or 0
-        mark_step(ws, PipelineStep.LOAD_PDF, progress=5, total_page=pages_total)
+        file_path = ws.uploaded_pdf.path
+        mime_type, _ = mimetypes.guess_type(file_path)
+
+        # === Case 1: PDF ===
+        if mime_type == "application/pdf":
+            pdf_doc = fitz.open(file_path)
+            pages_total = pdf_doc.page_count or 0
+            mark_step(ws, PipelineStep.LOAD_PDF, progress=5, total_page=pages_total)
+            pages_iter = [(i + 1, page) for i, page in enumerate(pdf_doc)]
+            is_pdf = True
+
+        # === Case 2: Image ===
+        elif mime_type and mime_type.startswith("image/"):
+            pages_total = 1
+            mark_step(ws, PipelineStep.LOAD_PDF, progress=5, total_page=1)
+            pages_iter = [(1, file_path)]  # Treat image as single page
+            is_pdf = False
+
+        else:
+            raise ValueError(f"Unsupported file type: {mime_type}")
+
     except Exception as e:
+        print(f"[!] Error loading file: {e}")
         mark_failed(ws, PipelineStep.LOAD_PDF, reason=str(e))
         return
 
     print(f"Processing workspace {ws.id} … pages={pages_total}")
 
-    # Derivative storage dirs
+    # Derivative directories
     tiles_root = _media_path("tiles", f"workspace_{ws.id}")
     full_root = _media_path("fullpages", f"workspace_{ws.id}")
     thumbs_root = _media_path("thumbnails", f"workspace_{ws.id}")
@@ -270,76 +294,96 @@ def process_workspace(
     _ensure_dir(thumbs_root)
 
     # External API config
-    api_url = getattr(settings, "DTI_API_URL", None)
+    raw_api_url = getattr(settings, "DTI_API_URL", None)
+    api_url = urllib.parse.unquote(raw_api_url) if raw_api_url else None
     api_key = getattr(settings, "DTI_API_KEY", None)
     api_headers = {"accept": "application/json"}
     if api_key:
         api_headers["x-api-key"] = api_key
 
     try:
-        for i, page in enumerate(pdf_doc):
-            page_fraction = i * 90 / pages_total
+        for i, page in pages_iter:
+            page_fraction = (i - 1) * 90 / pages_total
 
-            # Step 1: Render & derivatives
-            mark_step(ws, PipelineStep.RENDER_PAGES, progress=int(round(30 / pages_total + page_fraction)), total_page=pages_total)
+            # --- Step 1: Render & derivatives ---
+            mark_step(ws, PipelineStep.RENDER_PAGES,
+                      progress=int(round(30 / pages_total + page_fraction)),
+                      total_page=pages_total)
 
-            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x scale
-            buffer = BytesIO(pix.tobytes("png"))
-            image_file = ContentFile(buffer.getvalue(), name=f"page_{i+1}.png")
+            if is_pdf:
+                # PDF -> PNG conversion
+                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                buffer = BytesIO(pix.tobytes("png"))
+                image_file = ContentFile(buffer.getvalue(), name=f"page_{i}.png")
+                width, height = pix.width, pix.height
 
+            else:
+                # Image -> Pillow read
+                with Image.open(page) as img:
+                    img = img.convert("RGB")
+                    width, height = img.size
+                    buf = BytesIO()
+                    img.save(buf, format="PNG")
+                    image_file = ContentFile(buf.getvalue(), name=f"page_{i}.png")
+
+            # Save PageImage entry
             page_image, _ = PageImage.objects.update_or_create(
                 workspace=ws,
-                page_number=i + 1,
+                page_number=i,
                 defaults={
                     "image": image_file,
-                    "width": pix.width,
-                    "height": pix.height,
+                    "width": width,
+                    "height": height,
                     "extract_status": ExtractStatus.QUEUED,
                 },
             )
 
-            mark_step(ws, PipelineStep.RENDER_PAGES, progress=int(round(40 / pages_total + page_fraction)), total_page=pages_total)
+            mark_step(ws, PipelineStep.RENDER_PAGES,
+                      progress=int(round(40 / pages_total + page_fraction)),
+                      total_page=pages_total)
 
-            # Tiles for the page
-            page_tile_dir = os.path.join(tiles_root, f"page_{i+1}")
+            # --- Generate tiles ---
+            page_tile_dir = os.path.join(tiles_root, f"page_{i}")
             generate_tiles_pyramid(
                 image_path=page_image.image.path,
                 base_tile_dir=page_tile_dir,
                 max_zoom=max_zoom,
             )
 
-            # Full JPEG image
-            full_img_path = os.path.join(full_root, f"page_{i+1}.jpg")
+            # --- Full JPEG ---
+            full_img_path = os.path.join(full_root, f"page_{i}.jpg")
             with Image.open(page_image.image.path) as full_img:
                 full_img.convert("RGB").save(full_img_path, "JPEG", quality=90)
 
-            # Thumbnail
-            thumb_path = os.path.join(thumbs_root, f"page_{i+1}.jpg")
+            # --- Thumbnail ---
+            thumb_path = os.path.join(thumbs_root, f"page_{i}.jpg")
             with Image.open(page_image.image.path) as img:
                 img.thumbnail((256, 256), Image.LANCZOS)
                 img.convert("RGB").save(thumb_path, "JPEG", quality=85)
 
-            # Step 2: Polygon extraction (only if auto_extract_on_upload)
-            if auto_extract_on_upload:
-                mark_step(ws, PipelineStep.EXTRACT_POLYGONS, progress=(round(50 / pages_total + page_fraction)), total_page=pages_total)
+            # --- Step 2: Polygon extraction ---
+            if auto_extract_on_upload and api_url:
+                mark_step(ws, PipelineStep.EXTRACT_POLYGONS,
+                          progress=int(round(50 / pages_total + page_fraction)),
+                          total_page=pages_total)
 
                 PageImage.objects.filter(
-                    workspace=ws, page_number=i + 1
+                    workspace=ws, page_number=i
                 ).update(extract_status=ExtractStatus.PROCESSING)
 
                 try:
                     with open(full_img_path, "rb") as f:
                         resp = requests.post(
-                            url=f"{api_url}?segmentation_method=GENERIC&debug=false",
+                            url=f"{api_url}/process-image/?segmentation_method=GENERIC&debug=false",
                             headers=api_headers,
                             files={"file": ("page.jpg", f, "image/jpeg")},
                             timeout=60,
                         )
+
                     if resp.status_code == 200:
                         result = resp.json()
                         patterns = result.get("polygons", {}).get("patterns", []) or []
                         created = 0
-
                         for pattern in patterns:
                             raw_vertices = pattern.get("vertices", [])
                             if (
@@ -359,35 +403,35 @@ def process_workspace(
                                 vertices=vertices,
                             )
                             created += 1
-                        print(f"[✓] Page {i+1}: stored {created} polygons.")
+                        print(f"[✓] Page {i}: stored {created} polygons.")
                     else:
-                        print(
-                            f"[✗] API error page {i+1}: {resp.status_code} - {resp.text[:200]}"
-                        )
+                        print(f"[✗] API error page {i}: {resp.status_code} - {resp.text[:200]}")
+
                 except Exception as api_err:
-                    print(f"[!] API request failed for page {i+1}: {api_err}")
+                    print(f"[!] API request failed for page {i}: {api_err}")
 
                 PageImage.objects.filter(
-                    workspace=ws, page_number=i + 1, extract_status=ExtractStatus.PROCESSING
+                    workspace=ws, page_number=i, extract_status=ExtractStatus.PROCESSING
                 ).update(
                     extract_status=ExtractStatus.FINISHED,
                     segmentation_choice=SegmentationChoice.GENERIC,
                     dpi=100,
-                    analyze_region={"x1": 0, "y1": 0, "x2": pix.width, "y2": pix.height},
+                    analyze_region={"x1": 0, "y1": 0, "x2": width, "y2": height},
                 )
             else:
-                # Skip polygons, just mark as "no extraction" for the page
                 PageImage.objects.filter(
-                    workspace=ws, page_number=i + 1
+                    workspace=ws, page_number=i
                 ).update(extract_status=ExtractStatus.NONE)
 
-        # Finalize
+        # --- Finalize ---
         mark_step(ws, PipelineStep.POSTPROCESS, progress=95, total_page=pages_total)
         mark_succeeded(ws)
-        print(f"Workspace {ws.id} processed successfully.")
+        print(f"[✓] Workspace {ws.id} processed successfully.")
 
     except Exception as e:
-        mark_failed(ws, step=ws.pipeline_step or PipelineStep.POSTPROCESS, reason=str(e))
+        print(f"[!] Error processing workspace {ws.id}: {e}")
+        mark_failed(ws, step=ws.pipeline_step or PipelineStep.POSTPROCESS,
+                    reason=str(e))
 
 
 
@@ -406,7 +450,7 @@ def process_pending_workspaces(batch_size: int = 10) -> None:
 
             process_workspace(ws, auto_extract_on_upload=ws.auto_extract_on_upload)
         except Exception as e:
-            mark_failed(ws, step=ws.pipeline_step or PipelineStep.LOAD_PDF, reason=str(e))
+            mark_failed(ws, step=ws.pipeline_step or PipelineStep.LOAD_PDF, reason=str(e), total_page=0)
 
 
 
@@ -427,19 +471,12 @@ def process_page_region(
       {"x": 10, "y": 150}
     ]
     """
-    print(f"[!] Processing workspace={ws.id}, page={page_number}, region={rect_points}")
-    
-    # Import page_event for real-time updates
-
-    
     page_image = None
     
     try:
         pdf_doc = fitz.open(ws.uploaded_pdf.path)
         page = pdf_doc[page_number - 1]
     except Exception as e:
-        print(f"[✗] Failed to load page {page_number}: {e}")
-        # Send failure event
         try:
             page_image = ws.pages.get(page_number=page_number)
             page_event(
@@ -461,8 +498,6 @@ def process_page_region(
 
     scale = dpi / 100.0
     pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
-    buffer = BytesIO(pix.tobytes("png"))
-    image_file = ContentFile(buffer.getvalue(), name=f"page_{page_number}.png")
 
     page_image, _ = PageImage.objects.update_or_create(
         workspace=ws,
@@ -470,7 +505,6 @@ def process_page_region(
         defaults={"extract_status": ExtractStatus.QUEUED},
     )
     
-    # Send processing started event
     page_event(
         event_type=EventType.TASK_STARTED,
         task_id=str(ws.id),
@@ -484,13 +518,6 @@ def process_page_region(
             "extract_status": page_image.extract_status,
         },
     )
-
-    # send_notification_to_job_group(
-    #     job_id=str(page_image.id),
-    #     project_id=str(ws.id),
-    #     title="Polygon Extraction Started",
-    #     level="task_started",
-    # )
 
     full_img_path = page_image.image
 
@@ -507,8 +534,8 @@ def process_page_region(
 
     analyze_region = {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
 
-    # Call API
-    api_url = getattr(settings, "DTI_API_URL", None)
+    raw_api_url = getattr(settings, "DTI_API_URL", None)
+    api_url = urllib.parse.unquote(raw_api_url) if raw_api_url else None
     api_key = getattr(settings, "DTI_API_KEY", None)
     api_headers = {"accept": "application/json"}
     if api_key:
@@ -520,10 +547,20 @@ def process_page_region(
     _emit_progress_job(ws, EventType.TASK_PROGRESS, page_image, page_number, ExtractStatus.PROCESSING)
 
 
+    # Ensure segmentation method is uppercase for DTI API
+    dti_segmentation_method = segmentation_method.upper()
+
+    print(f"[!] Segmentation method: {dti_segmentation_method}")
+    print(f"[!] API headers: {api_headers}")
+    print(f"[!] Cropped path: {cropped_path}")
+
+    print(f"[!] API URL: {api_url}")
+    
     try:
+        
         with open(cropped_path, "rb") as f:
             resp = requests.post(
-                url=f"{api_url}?segmentation_method={segmentation_method}&debug=false",
+                url=f"{api_url}/process-image/?segmentation_method={dti_segmentation_method}&debug=false",
                 headers=api_headers,
                 files={"file": ("region.jpg", f, "image/jpeg")},
                 timeout=60,
@@ -612,10 +649,8 @@ def process_page_region(
         analyze_region=analyze_region,
     )
     
-    # Send processing completed event
     _emit_progress_job(ws, EventType.TASK_COMPLETED, page_image, page_number, ExtractStatus.FINISHED)
     
-    # Send notification to job group
     try:
         send_notification_to_job_group(
             job_id=str(page_image.id),
@@ -625,3 +660,136 @@ def process_page_region(
         )
     except Exception as notify_err:
         print(f"Failed to send success notification: {notify_err}")
+
+
+def process_single_image_page(ws: Workspace, page_image: PageImage):
+    """
+    Process a single image page for polygon extraction.
+    Image processing (tiles, thumbnails, JPEG) is already done during upload.
+    
+    Args:
+        ws: Workspace instance
+        page_image: PageImage instance to process
+    """
+    try:
+        page_event(
+            event_type=EventType.TASK_STARTED,
+            task_id=str(page_image.id),
+            project_id=str(ws.id),
+            user_id=ws.user_id,
+            job_type=JobType.POLYGON_EXTRACTION,
+            page_id=page_image.id,
+            page_number=page_image.page_number,
+            workspace_id=str(ws.id),
+            payload={
+                "extract_status": page_image.extract_status,
+            },
+        )
+        
+        full_jpeg_path = page_image.image.path
+        
+        if not os.path.exists(full_jpeg_path):
+            raise FileNotFoundError(f"Image file not found: {full_jpeg_path}")
+        
+        raw_api_url = getattr(settings, "DTI_API_URL", None)
+        api_url = urllib.parse.unquote(raw_api_url) if raw_api_url else None
+        api_key = getattr(settings, "DTI_API_KEY", None)
+        api_headers = {"accept": "application/json"}
+        if api_key:
+            api_headers["x-api-key"] = api_key
+        
+        if api_url:
+            page_image.extract_status = ExtractStatus.PROCESSING
+            page_image.save()
+            
+            _emit_progress_job(ws, EventType.TASK_PROGRESS, page_image, page_image.page_number, ExtractStatus.PROCESSING)
+            
+            try:
+                with open(full_jpeg_path, "rb") as f:
+                    resp = requests.post(
+                        url=f"{api_url}/process-image/?segmentation_method=GENERIC&debug=false",
+                        headers=api_headers,
+                        files={"file": ("page.jpg", f, "image/jpeg")},
+                        timeout=60,
+                    )
+                if resp.status_code == 200:
+                    result = resp.json()
+                    patterns = result.get("polygons", {}).get("patterns", []) or []
+                    created = 0
+                    for pattern in patterns:
+                        raw_vertices = pattern.get("vertices", [])
+                        vertices = raw_vertices[0] if (len(raw_vertices) == 1 and isinstance(raw_vertices[0], list)) else raw_vertices
+
+                        Polygon.objects.create(
+                            workspace=ws,
+                            page=page_image,
+                            polygon_id=pattern.get("polygon_id"),
+                            total_vertices=pattern.get("total_vertices"),
+                            vertices=vertices,
+                        )
+                        created += 1
+                    print(f"[✓] Page {page_image.page_number}: stored {created} polygons.")
+                    page_image.extract_status = ExtractStatus.FINISHED
+                    
+                    _emit_progress_job(ws, EventType.TASK_COMPLETED, page_image, page_image.page_number, ExtractStatus.FINISHED)
+                    
+                    try:
+                        send_notification_to_job_group(
+                            job_id=str(page_image.id),
+                            project_id=str(ws.id),
+                            title=f"{ws.name} - Page {page_image.page_number} Analysis Complete",
+                            level="success",
+                        )
+                    except Exception as notify_err:
+                        print(f"Failed to send success notification: {notify_err}")
+                        
+                else:
+                    print(f"[✗] API error page {page_image.page_number}: {resp.status_code} - {resp.text[:200]}")
+                    page_image.extract_status = ExtractStatus.FAILED
+                    
+                    _emit_progress_job(ws, EventType.TASK_FAILED, page_image, page_image.page_number, ExtractStatus.FAILED)
+                    
+                    try:
+                        send_notification_to_job_group(
+                            job_id=str(page_image.id),
+                            project_id=str(ws.id),
+                            title=f"{ws.name} - Page {page_image.page_number} Analysis Failed",
+                            level="error",
+                        )
+                    except Exception as notify_err:
+                        print(f"Failed to send failure notification: {notify_err}")
+                        
+            except Exception as api_err:
+                print(f"[!] API request failed for page {page_image.page_number}: {api_err}")
+                page_image.extract_status = ExtractStatus.FAILED
+                
+                _emit_progress_job(ws, EventType.TASK_FAILED, page_image, page_image.page_number, ExtractStatus.FAILED)
+                
+                try:
+                    send_notification_to_job_group(
+                        job_id=str(page_image.id),
+                        project_id=str(ws.id),
+                        title=f"{ws.name} - Page {page_image.page_number} Analysis Failed",
+                        level="error",
+                    )
+                except Exception as notify_err:
+                    print(f"Failed to send failure notification: {notify_err}")
+        else:
+            print(f"No API URL configured, skipping polygon extraction for page {page_image.page_number}")
+            page_image.extract_status = ExtractStatus.FINISHED
+            
+            _emit_progress_job(ws, EventType.TASK_COMPLETED, page_image, page_image.page_number, ExtractStatus.FINISHED)
+        
+        page_image.save()
+        
+    except Exception as e:
+        print(f"Error processing single image page {page_image.page_number}: {e}")
+        page_image.extract_status = ExtractStatus.FAILED
+        page_image.save()
+        
+        try:
+            _emit_progress_job(ws, EventType.TASK_FAILED, page_image, page_image.page_number, ExtractStatus.FAILED)
+        except Exception:
+            pass
+        
+        raise e
