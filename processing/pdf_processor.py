@@ -3,14 +3,14 @@
 import os
 import urllib.parse
 from io import BytesIO
+import requests
 from typing import Optional, List, Dict
 
-import fitz  # PyMuPDF
+import fitz     
 from PIL import Image
-import requests
+from django.core.files.base import ContentFile
 
 from django.conf import settings
-from django.core.files.base import ContentFile
 from django.db import transaction
 
 from workspace.models import (
@@ -29,6 +29,7 @@ from pdfmap_project.websocket_utils import (
     send_notification_to_job_group,
     send_notification_to_project_group
 )
+import mimetypes
 
 
 # ----------------------------- helpers -----------------------------
@@ -188,50 +189,116 @@ def mark_succeeded(ws: Workspace) -> None:
 
 # ----------------------------- tiling -----------------------------
 
+# def generate_tiles_pyramid(image_path: str, base_tile_dir: str, *, max_zoom: int = 6, tile_size: int = 256) -> None:
+#     """
+#     Generate tiles at multiple zoom levels (z=0..max_zoom) from the input image.
+#     Directory layout: base_tile_dir/<z>/<col>/<row>.jpg
+#     """
+#     _ensure_dir(base_tile_dir)
+
+#     with Image.open(image_path) as original_img:
+#         # Convert to RGB to handle palette mode images
+#         if original_img.mode in ('P', 'RGBA', 'LA'):
+#             original_img = original_img.convert("RGB")
+        
+#         original_width, original_height = original_img.size
+
+#         for z in range(max_zoom + 1):
+#             scale = 1 / (2 ** (max_zoom - z))
+#             new_width = max(1, int(original_width * scale))
+#             new_height = max(1, int(original_height * scale))
+#             resized_img = original_img.resize((new_width, new_height), resample=Image.LANCZOS)
+
+#             cols = (new_width + tile_size - 1) // tile_size
+#             rows = (new_height + tile_size - 1) // tile_size
+
+#             z_dir_root = os.path.join(base_tile_dir, str(z))
+#             _ensure_dir(z_dir_root)
+
+#             for row in range(rows):
+#                 for col in range(cols):
+#                     left = col * tile_size
+#                     upper = row * tile_size
+#                     right = min(left + tile_size, new_width)
+#                     lower = min(upper + tile_size, new_height)
+
+#                     tile = resized_img.crop((left, upper, right, lower))
+
+#                     col_dir = os.path.join(z_dir_root, str(col))
+#                     _ensure_dir(col_dir)
+
+#                     tile_path = os.path.join(col_dir, f"{row}.jpg")
+#                     tile.save(tile_path, "JPEG", quality=80)
+
+
+
 def generate_tiles_pyramid(image_path: str, base_tile_dir: str, *, max_zoom: int = 6, tile_size: int = 256) -> None:
     """
     Generate tiles at multiple zoom levels (z=0..max_zoom) from the input image.
     Directory layout: base_tile_dir/<z>/<col>/<row>.jpg
     """
-    _ensure_dir(base_tile_dir)
+    try:
+        _ensure_dir(base_tile_dir)
 
-    with Image.open(image_path) as original_img:
-        # Convert to RGB to handle palette mode images
-        if original_img.mode in ('P', 'RGBA', 'LA'):
-            original_img = original_img.convert("RGB")
+        with Image.open(image_path) as original_img:
+            # Force-load the image data into memory to prevent lazy I/O crashes
+            original_img.load()
+
+            # Convert to safe RGB mode
+            if original_img.mode in ('P', 'RGBA', 'LA', 'CMYK'):
+                original_img = original_img.convert("RGB")
+
+            original_width, original_height = original_img.size
+
+            for z in range(max_zoom + 1):
+                try:
+                    scale = 1 / (2 ** (max_zoom - z))
+                    new_width = max(1, int(original_width * scale))
+                    new_height = max(1, int(original_height * scale))
+
+                    resized_img = original_img.resize(
+                        (new_width, new_height),
+                        resample=Image.LANCZOS
+                    )
+
+                    cols = (new_width + tile_size - 1) // tile_size
+                    rows = (new_height + tile_size - 1) // tile_size
+
+                    z_dir_root = os.path.join(base_tile_dir, str(z))
+                    _ensure_dir(z_dir_root)
+
+                    for row in range(rows):
+                        for col in range(cols):
+                            left = col * tile_size
+                            upper = row * tile_size
+                            right = min(left + tile_size, new_width)
+                            lower = min(upper + tile_size, new_height)
+
+                            # Crop and save tile
+                            tile = resized_img.crop((left, upper, right, lower))
+
+                            col_dir = os.path.join(z_dir_root, str(col))
+                            _ensure_dir(col_dir)
+
+                            tile_path = os.path.join(col_dir, f"{row}.jpg")
+
+                            try:
+                                tile.save(tile_path, "JPEG", quality=85, optimize=True)
+                            except Exception as save_err:
+                                print(f"[✗] Failed to save tile {tile_path}: {save_err}")
+                            finally:
+                                tile.close()
+
+                    resized_img.close()
+
+                except Exception as zoom_err:
+                    print(f"[!] Zoom level {z} failed: {zoom_err}")
+
+            print(f"[✓] Completed tiling pyramid for {os.path.basename(image_path)}")
+
+    except Exception as e:
+        print(f"[✗] generate_tiles_pyramid failed for {image_path}: {e}")
         
-        original_width, original_height = original_img.size
-
-        for z in range(max_zoom + 1):
-            scale = 1 / (2 ** (max_zoom - z))
-            new_width = max(1, int(original_width * scale))
-            new_height = max(1, int(original_height * scale))
-            resized_img = original_img.resize((new_width, new_height), resample=Image.LANCZOS)
-
-            cols = (new_width + tile_size - 1) // tile_size
-            rows = (new_height + tile_size - 1) // tile_size
-
-            z_dir_root = os.path.join(base_tile_dir, str(z))
-            _ensure_dir(z_dir_root)
-
-            for row in range(rows):
-                for col in range(cols):
-                    left = col * tile_size
-                    upper = row * tile_size
-                    right = min(left + tile_size, new_width)
-                    lower = min(upper + tile_size, new_height)
-
-                    tile = resized_img.crop((left, upper, right, lower))
-
-                    col_dir = os.path.join(z_dir_root, str(col))
-                    _ensure_dir(col_dir)
-
-                    tile_path = os.path.join(col_dir, f"{row}.jpg")
-                    tile.save(tile_path, "JPEG", quality=80)
-
-            print(f"✓ Zoom {z} → {cols}x{rows} tiles")
-
-
 # ----------------------------- main processing -----------------------------
 
 def process_workspace(
@@ -245,15 +312,7 @@ def process_workspace(
       1) Page/image rendering and tiling
       2) (Optional) Polygon extraction
     """
-    import os
-    import mimetypes
-    import fitz
-    import requests
-    from io import BytesIO
-    from PIL import Image
-    from django.core.files.base import ContentFile
-
-    print(f"[!] Workspace {ws.id} is being processed")
+ 
 
     # Ensure reprocessing only when idle/failed
     if ws.pipeline_state not in (PipelineState.IDLE, PipelineState.FAILED) and ws.pipeline_step != PipelineStep.QUEUED:
@@ -407,7 +466,6 @@ def process_workspace(
                                 vertices=vertices,
                             )
                             created += 1
-                        print(f"[✓] Page {i}: stored {created} polygons.")
                     else:
                         print(f"[✗] API error page {i}: {resp.status_code} - {resp.text[:200]}")
 
@@ -430,7 +488,6 @@ def process_workspace(
         # --- Finalize ---
         mark_step(ws, PipelineStep.POSTPROCESS, progress=95, total_page=pages_total)
         mark_succeeded(ws)
-        print(f"[✓] Workspace {ws.id} processed successfully.")
 
     except Exception as e:
         print(f"[!] Error processing workspace {ws.id}: {e}")
@@ -553,12 +610,6 @@ def process_page_region(
 
     # Ensure segmentation method is uppercase for DTI API
     dti_segmentation_method = segmentation_method.upper()
-
-    print(f"[!] Segmentation method: {dti_segmentation_method}")
-    print(f"[!] API headers: {api_headers}")
-    print(f"[!] Cropped path: {cropped_path}")
-
-    print(f"[!] API URL: {api_url}")
     
     try:
         
@@ -608,14 +659,10 @@ def process_page_region(
                     total_vertices=pattern.get("total_vertices"),
                     vertices=pattern.get("vertices"),
                 )
-            print(f"[✓] Page {page_number}: stored {len(adjusted_patterns)} polygons in region.")
         else:
-            print(f"[✗] API error page {page_number}: {resp.status_code} - {resp.text[:200]}")
-            # Update status to failed and send failure event
             PageImage.objects.filter(id=page_image.id).update(extract_status=ExtractStatus.FAILED)
             _emit_progress_job(ws, EventType.TASK_FAILED, page_image, page_number, ExtractStatus.FAILED)
             
-            # Send failure notification to job group
             try:
                 send_notification_to_job_group(
                     job_id=str(page_image.id),
@@ -628,12 +675,9 @@ def process_page_region(
             return
 
     except Exception as api_err:
-        print(f"[!] API request failed for page {page_number}: {api_err}")
-        # Update status to failed and send failure event
         PageImage.objects.filter(id=page_image.id).update(extract_status=ExtractStatus.FAILED)
         _emit_progress_job(ws, EventType.TASK_FAILED, page_image, page_number, ExtractStatus.FAILED)
         
-        # Send failure notification to job group
         try:
             send_notification_to_job_group(
                 job_id=str(page_image.id),
@@ -669,13 +713,14 @@ def process_page_region(
 def process_single_image_page(ws: Workspace, page_image: PageImage):
     """
     Process a single image page for polygon extraction.
-    This function handles both image processing (tiles, thumbnails, JPEG) and polygon extraction.
-    
-    Args:
-        ws: Workspace instance
-        page_image: PageImage instance to process
+    Handles both image post-processing (tiles, thumbnails, JPEG)
+    and remote polygon extraction via API.
+
+    Automatically supports PNG fallback if the stored image file is missing or renamed.
     """
+
     try:
+        # === Emit "task started" event ===
         page_event(
             event_type=EventType.TASK_STARTED,
             task_id=str(page_image.id),
@@ -685,17 +730,21 @@ def process_single_image_page(ws: Workspace, page_image: PageImage):
             page_id=page_image.id,
             page_number=page_image.page_number,
             workspace_id=str(ws.id),
-            payload={
-                "extract_status": page_image.extract_status,
-            },
+            payload={"extract_status": page_image.extract_status},
         )
-        
+
+        # === Resolve actual image path (support .png fallback) ===
         full_jpeg_path = page_image.image.path
-        
         if not os.path.exists(full_jpeg_path):
-            raise FileNotFoundError(f"Image file not found: {full_jpeg_path}")
-        
-        # --- Generate tiles, full JPEG, and thumbnail ---
+            base, ext = os.path.splitext(full_jpeg_path)
+            png_path = base + ".png"
+            if os.path.exists(png_path):
+                full_jpeg_path = png_path
+                print(f"[!] Fallback: using PNG file for page {page_image.page_number}")
+            else:
+                raise FileNotFoundError(f"Image file not found: {full_jpeg_path}")
+
+        # === Ensure workspace media directories ===
         tiles_root = _media_path("tiles", f"workspace_{ws.id}")
         full_root = _media_path("fullpages", f"workspace_{ws.id}")
         thumbs_root = _media_path("thumbnails", f"workspace_{ws.id}")
@@ -703,7 +752,7 @@ def process_single_image_page(ws: Workspace, page_image: PageImage):
         _ensure_dir(full_root)
         _ensure_dir(thumbs_root)
 
-        # Generate tiles pyramid
+        # === Generate tiles pyramid ===
         page_tile_dir = os.path.join(tiles_root, f"page_{page_image.page_number}")
         generate_tiles_pyramid(
             image_path=full_jpeg_path,
@@ -711,38 +760,38 @@ def process_single_image_page(ws: Workspace, page_image: PageImage):
             max_zoom=6,
         )
 
-        # Generate full JPEG
+        # === Always produce .jpg copies for frontend ===
         full_img_path = os.path.join(full_root, f"page_{page_image.page_number}.jpg")
+        thumb_path = os.path.join(thumbs_root, f"page_{page_image.page_number}.jpg")
+
+        # Full-page JPEG
         with Image.open(full_jpeg_path) as full_img:
-            # Convert to RGB to handle palette mode images
-            if full_img.mode in ('P', 'RGBA', 'LA'):
+            if full_img.mode in ("P", "RGBA", "LA"):
                 full_img = full_img.convert("RGB")
             full_img.save(full_img_path, "JPEG", quality=90)
 
-        # Generate thumbnail
-        thumb_path = os.path.join(thumbs_root, f"page_{page_image.page_number}.jpg")
-        with Image.open(full_jpeg_path) as img:
-            # Convert to RGB to handle palette mode images
-            if img.mode in ('P', 'RGBA', 'LA'):
-                img = img.convert("RGB")
-            img.thumbnail((256, 256), Image.LANCZOS)
-            img.save(thumb_path, "JPEG", quality=85)
-        
-        print(f"[✓] Generated tiles, full JPEG, and thumbnail for page {page_image.page_number}")
-        
+        # Thumbnail JPEG
+        with Image.open(full_jpeg_path) as thumb_img:
+            if thumb_img.mode in ("P", "RGBA", "LA"):
+                thumb_img = thumb_img.convert("RGB")
+            thumb_img.thumbnail((256, 256), Image.LANCZOS)
+            thumb_img.save(thumb_path, "JPEG", quality=85)
+
+
+        # === Prepare external API request ===
         raw_api_url = getattr(settings, "DTI_API_URL", None)
         api_url = urllib.parse.unquote(raw_api_url) if raw_api_url else None
         api_key = getattr(settings, "DTI_API_KEY", None)
         api_headers = {"accept": "application/json"}
         if api_key:
             api_headers["x-api-key"] = api_key
-        
+
+        # === Polygon extraction ===
         if api_url:
             page_image.extract_status = ExtractStatus.PROCESSING
             page_image.save()
-            
             _emit_progress_job(ws, EventType.TASK_PROGRESS, page_image, page_image.page_number, ExtractStatus.PROCESSING)
-            
+
             try:
                 with open(full_jpeg_path, "rb") as f:
                     resp = requests.post(
@@ -751,10 +800,12 @@ def process_single_image_page(ws: Workspace, page_image: PageImage):
                         files={"file": ("page.jpg", f, "image/jpeg")},
                         timeout=60,
                     )
+
                 if resp.status_code == 200:
                     result = resp.json()
                     patterns = result.get("polygons", {}).get("patterns", []) or []
                     created = 0
+
                     for pattern in patterns:
                         raw_vertices = pattern.get("vertices", [])
                         vertices = raw_vertices[0] if (len(raw_vertices) == 1 and isinstance(raw_vertices[0], list)) else raw_vertices
@@ -767,11 +818,11 @@ def process_single_image_page(ws: Workspace, page_image: PageImage):
                             vertices=vertices,
                         )
                         created += 1
+
                     print(f"[✓] Page {page_image.page_number}: stored {created} polygons.")
                     page_image.extract_status = ExtractStatus.FINISHED
-                    
                     _emit_progress_job(ws, EventType.TASK_COMPLETED, page_image, page_image.page_number, ExtractStatus.FINISHED)
-                    
+
                     try:
                         send_notification_to_job_group(
                             job_id=str(page_image.id),
@@ -780,14 +831,13 @@ def process_single_image_page(ws: Workspace, page_image: PageImage):
                             level="success",
                         )
                     except Exception as notify_err:
-                        print(f"Failed to send success notification: {notify_err}")
-                        
+                        print(f"⚠️ Failed to send success notification: {notify_err}")
+
                 else:
                     print(f"[✗] API error page {page_image.page_number}: {resp.status_code} - {resp.text[:200]}")
                     page_image.extract_status = ExtractStatus.FAILED
-                    
                     _emit_progress_job(ws, EventType.TASK_FAILED, page_image, page_image.page_number, ExtractStatus.FAILED)
-                    
+
                     try:
                         send_notification_to_job_group(
                             job_id=str(page_image.id),
@@ -796,14 +846,13 @@ def process_single_image_page(ws: Workspace, page_image: PageImage):
                             level="error",
                         )
                     except Exception as notify_err:
-                        print(f"Failed to send failure notification: {notify_err}")
-                        
+                        print(f"⚠️ Failed to send failure notification: {notify_err}")
+
             except Exception as api_err:
                 print(f"[!] API request failed for page {page_image.page_number}: {api_err}")
                 page_image.extract_status = ExtractStatus.FAILED
-                
                 _emit_progress_job(ws, EventType.TASK_FAILED, page_image, page_image.page_number, ExtractStatus.FAILED)
-                
+
                 try:
                     send_notification_to_job_group(
                         job_id=str(page_image.id),
@@ -812,23 +861,21 @@ def process_single_image_page(ws: Workspace, page_image: PageImage):
                         level="error",
                     )
                 except Exception as notify_err:
-                    print(f"Failed to send failure notification: {notify_err}")
+                    print(f"⚠️ Failed to send failure notification: {notify_err}")
+
         else:
-            print(f"No API URL configured, skipping polygon extraction for page {page_image.page_number}")
             page_image.extract_status = ExtractStatus.FINISHED
-            
             _emit_progress_job(ws, EventType.TASK_COMPLETED, page_image, page_image.page_number, ExtractStatus.FINISHED)
-        
+
         page_image.save()
-        
+
     except Exception as e:
-        print(f"Error processing single image page {page_image.page_number}: {e}")
         page_image.extract_status = ExtractStatus.FAILED
         page_image.save()
-        
+
         try:
             _emit_progress_job(ws, EventType.TASK_FAILED, page_image, page_image.page_number, ExtractStatus.FAILED)
         except Exception:
             pass
-        
+
         raise e

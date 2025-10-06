@@ -1337,7 +1337,6 @@ def create_multi_polygon(request, workspace_id, page_id):
 
                     except Exception as e:
                         error_msg = f"Polygon {i+1}: Failed to create - {str(e)}"
-                        print(f"DEBUG: {error_msg}")
                         validation_errors.append(error_msg)
                         continue
 
@@ -1366,7 +1365,6 @@ def create_multi_polygon(request, workspace_id, page_id):
             except Exception as e:
                 print(f"DEBUG: Could not refresh polygons from DB: {e}")
 
-            # Additional verification: Check if polygons exist by querying fresh from DB
             fresh_polygons = Polygon.objects.filter(
                 workspace_id=ws.id,
                 page=page_obj,
@@ -1379,7 +1377,6 @@ def create_multi_polygon(request, workspace_id, page_id):
 
                 # Check if polygon exists in our fresh query results
                 if polygon.polygon_id in fresh_polygon_ids:
-                    print(f"SUCCESS: Polygon {polygon.polygon_id} verified in database (found in fresh query)")
                     continue
 
                 # Try multiple ways to find the polygon as fallback
@@ -1433,7 +1430,6 @@ def create_multi_polygon(request, workspace_id, page_id):
                     args=[ws.id],
                     countdown=2  # Wait 2 seconds before syncing
                 )
-                print(f"DEBUG: Queued FULL sync task for {len(created_polygons)} polygons (delayed by 2 seconds)")
             except Exception as e:
                 print(f"Warning: Failed to queue sync task: {str(e)}")
         else:
@@ -1455,15 +1451,12 @@ def create_multi_polygon(request, workspace_id, page_id):
             }
         }
 
-        # Add verification errors to response if any
         if 'verification_errors' in locals() and verification_errors:
             response_data["verification_errors"] = verification_errors
 
         return Response(response_data, status=status.HTTP_201_CREATED)
 
     except Exception as e:
-        print(f"ERROR creating polygons: {str(e)}")
-        print(f"Exception type: {type(e)}")
         return Response(
             {"detail": f"Failed to create polygons: {str(e)}"},
             status=status.HTTP_400_BAD_REQUEST,
@@ -1488,7 +1481,6 @@ def delete_single_polygon(request, workspace_id, page_id, polygon_id):
         )
 
     try:
-        # Find and delete the polygon(s) - handle multiple polygons with same polygon_id
         polygons = Polygon.objects.filter(
             workspace_id=ws.id,
             page=page_obj,
@@ -1504,9 +1496,7 @@ def delete_single_polygon(request, workspace_id, page_id, polygon_id):
         # Delete all polygons with this polygon_id
         count = polygons.count()
         polygons.delete()
-        print(f"Deleted {count} polygons with polygon_id {polygon_id}")
 
-        # Queue sync task
         try:
             sync_workspace_tree_tto_task.delay(workspace_id=ws.id)
         except Exception as e:
@@ -1549,7 +1539,6 @@ def delete_multiple_polygons(request, workspace_id, page_id):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # Validate required fields
     if "polygon_ids" not in data:
         return Response(
             {"detail": "Missing required field: polygon_ids"},
@@ -1564,13 +1553,11 @@ def delete_multiple_polygons(request, workspace_id, page_id):
         )
 
     try:
-        # Find and delete the polygons
         deleted_count = 0
         not_found_ids = []
 
         for polygon_id in polygon_ids:
             try:
-                # Use filter() instead of get() to handle multiple polygons with same polygon_id
                 polygons = Polygon.objects.filter(
                     workspace_id=ws.id,
                     page=page_obj,
@@ -1578,16 +1565,13 @@ def delete_multiple_polygons(request, workspace_id, page_id):
                 )
 
                 if polygons.exists():
-                    # Delete all polygons with this polygon_id
                     count = polygons.count()
                     polygons.delete()
                     deleted_count += count
-                    print(f"Deleted {count} polygons with polygon_id {polygon_id}")
                 else:
                     not_found_ids.append(polygon_id)
 
             except Exception as e:
-                print(f"Error deleting polygon {polygon_id}: {str(e)}")
                 not_found_ids.append(polygon_id)
 
         # Queue sync task
@@ -1667,7 +1651,6 @@ def analyze_region(request, workspace_id, page_id):
         workspace = get_object_or_404(Workspace, id=workspace_id, user=request.user)
         page_image = get_object_or_404(PageImage, workspace=workspace, id=page_id)
 
-        # Store region data
         page_image.analyze_region = region_objects  # Store as array of objects
         page_image.segmentation_choice = segmentation_method
         page_image.dpi = dpi
@@ -1676,7 +1659,6 @@ def analyze_region(request, workspace_id, page_id):
 
         rect_points = []
         if len(region_objects) >= 2:
-            # For rectangle regions, use first and last points to create bounding box
             if segmentation_method == "GENERIC":
                 x_coords = [point["x"] for point in region_objects]
                 y_coords = [point["y"] for point in region_objects]
@@ -1687,19 +1669,15 @@ def analyze_region(request, workspace_id, page_id):
                     {"x": min(x_coords), "y": max(y_coords)}
                 ]
             else:
-                # For contoured regions, use all points
                 rect_points = region_objects
 
-        # Trigger the page processing task asynchronously
         try:
-            # Prepare region data for the task
             region_data = {
                 "region": region_objects,
                 "segmentation_method": segmentation_method,
                 "dpi": dpi
             }
 
-            # Start the task asynchronously (like process_workspace_task)
             task = simple_page_process_task.delay(
                 workspace_id=workspace_id,
                 page_id=page_id,
@@ -1707,14 +1685,11 @@ def analyze_region(request, workspace_id, page_id):
                 verbose=True
             )
 
-            # Store the task in the database using the model method
             page_image.set_task(task)
 
-            print(f"Started simple_page_process_task with ID: {task.id}")
 
         except Exception as task_error:
             print(f"Failed to start simple_page_process_task: {task_error}")
-            # Update status to failed if task couldn't be started
             with transaction.atomic():
                 page_image.extract_status = ExtractStatus.FAILED
                 page_image.save()
@@ -1723,7 +1698,7 @@ def analyze_region(request, workspace_id, page_id):
             "detail": "Region analysis started",
             "workspace_id": workspace_id,
             "page_id": page_id,
-            "region": region_objects,  # Return stored object format
+            "region": region_objects,
             "segmentation_method": segmentation_method,
             "dpi": dpi,
             "task_started": True,
@@ -1757,7 +1732,6 @@ def update_page_status(request, workspace_id, page_id):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Validate status
         valid_statuses = [choice[0] for choice in ExtractStatus.choices]
         if extract_status not in valid_statuses:
             return Response(
@@ -1765,11 +1739,9 @@ def update_page_status(request, workspace_id, page_id):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Get workspace and page image
         workspace = get_object_or_404(Workspace, id=workspace_id, user=request.user)
         page_image = get_object_or_404(PageImage, workspace=workspace, id=page_id)
 
-        # Update status
         page_image.extract_status = extract_status
         page_image.save()
 
@@ -1804,7 +1776,6 @@ def cancel_region_analysis(request, workspace_id, page_id):
         workspace = get_object_or_404(Workspace, id=workspace_id, user=request.user)
         page_image = get_object_or_404(PageImage, workspace=workspace, id=page_id)
 
-        # Check if task is in a cancellable state
         if page_image.extract_status not in [ExtractStatus.QUEUED, ExtractStatus.PROCESSING]:
             return Response(
                 {
@@ -1813,16 +1784,13 @@ def cancel_region_analysis(request, workspace_id, page_id):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Update status to canceled and clear region data atomically
         with transaction.atomic():
             page_image.extract_status = ExtractStatus.CANCELED
             page_image.save()
 
-        # Cancel the Celery task using the model method
         if page_image.task_id:
             page_image.cancel_task()
 
-            # Clear the task ID
             page_image.clear_task()
         else:
             print(f"[CANCEL] No task ID found for page {page_id}")
@@ -1913,15 +1881,11 @@ def add_page_to_workspace(request, workspace_id):
     }
     """
     try:
-        print(f"Add page request data: {request.data}")
-        
         # Get workspace and verify ownership
         workspace = get_object_or_404(Workspace, id=workspace_id, user=request.user)
-        print(f"Found workspace: {workspace.name} (ID: {workspace.id})")
         
         # Get file path from request
         file_path = request.data.get('file_path')
-        print(f"File path from request: {file_path}")
         if not file_path:
             return Response(
                 {"error": "file_path is required"}, 
@@ -1929,25 +1893,19 @@ def add_page_to_workspace(request, workspace_id):
             )
         
         # Validate file exists
-        print(f"Checking if file exists: {file_path}")
         if not default_storage.exists(file_path):
-            print(f"File not found: {file_path}")
             return Response(
                 {"error": "File not found"}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
-        print(f"File exists: {file_path}")
         
-        # Get page number (auto-increment if not provided)
         page_number = request.data.get('page_number')
         if page_number is None:
-            # Get the next page number
             max_page = PageImage.objects.filter(workspace=workspace).aggregate(
                 max_page=models.Max('page_number')
             )['max_page'] or 0
             page_number = max_page + 1
         
-        # Check if page number already exists
         if PageImage.objects.filter(workspace=workspace, page_number=page_number).exists():
             return Response(
                 {"error": f"Page {page_number} already exists in this workspace"}, 
@@ -1969,7 +1927,6 @@ def add_page_to_workspace(request, workspace_id):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Create the page in database first
         with transaction.atomic():
             page = PageImage.objects.create(
                 workspace=workspace,
@@ -1980,28 +1937,18 @@ def add_page_to_workspace(request, workspace_id):
                 extract_status=ExtractStatus.NONE
             )
         
-        # Create thumbnail immediately
         try:
-          
-            
-            # Create thumbnail directory
             thumbs_root = os.path.join(settings.MEDIA_ROOT, "thumbnails", f"workspace_{workspace_id}")
             os.makedirs(thumbs_root, exist_ok=True)
             
-            # Create thumbnail
             thumb_path = os.path.join(thumbs_root, f"page_{page_number}.jpg")
             with default_storage.open(file_path, 'rb') as f:
                 img = Image.open(f)
                 img.thumbnail((256, 256), Image.LANCZOS)
                 img.convert("RGB").save(thumb_path, "JPEG", quality=85)
             
-            # Thumbnail is created as a file, no need to store in database
-            
         except Exception as e:
             print(f"Failed to create thumbnail: {str(e)}")
-            # Don't fail the entire operation if thumbnail creation fails
-        
-        # Queue the Celery task for processing (after DB commit)
         
         try:
             task = add_page_to_workspace_task.delay(
@@ -2014,25 +1961,21 @@ def add_page_to_workspace(request, workspace_id):
             print(f"Celery task queued successfully with ID: {task.id}")
         except Exception as celery_error:
             print(f"Failed to queue Celery task: {str(celery_error)}")
-            # Don't fail the entire operation if Celery is down
             task = None
         
-        # Update page with task ID
         if task:
             page.task_id = task.id
             page.save()
         
-        # Serialize the created page
         page_serializer = PageImageSerializer(page)
         
-        # Return task information immediately
         return Response({
             "message": "Page addition queued successfully",
             "task_id": task.id if task else None,
             "workspace_id": workspace_id,
             "page_number": page_number,
             "auto_process": auto_process,
-            "page": page_serializer.data  # Include the created page data
+            "page": page_serializer.data
         }, status=status.HTTP_202_ACCEPTED)
         
     except Exception as e:
@@ -2070,19 +2013,16 @@ def fetch_segmentation_methods(request):
             timeout=30,
         )
         
-        print(f"[!] API response: {resp.status_code} - {resp.text[:200]}")
         
         resp.raise_for_status()
         return Response(resp.json())
 
     except requests.exceptions.RequestException as e:
-        print(f"[!] Request error: {str(e)}")
         return Response(
             {"error": f"Failed to fetch segmentation methods: {str(e)}"},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
     except Exception as e:
-        print(f"[!] Unexpected error: {str(e)}")
         return Response(
             {"error": f"Unexpected error: {str(e)}"},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
