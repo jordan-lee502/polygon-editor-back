@@ -393,7 +393,7 @@ def add_page_to_workspace_task(self, workspace_id: int, file_path: str, page_num
             raise
         
         if auto_process:
-            # Call process_single_image_page which handles both image processing and polygon extraction
+            # Call process_single_image_page which handles image processing (tiles, thumbnails, JPEG) and polygon extraction
             process_single_image_page(workspace, page)
             
             workspace_event(

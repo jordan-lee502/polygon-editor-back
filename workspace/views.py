@@ -8,8 +8,9 @@ from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
 from django.db.models import Q
 import os
-from django.conf import settings
 import urllib.parse
+import shutil
+
 
 from .models import Workspace, PageImage, Tag
 from annotations.models import Polygon, PolygonTag
@@ -268,6 +269,94 @@ def workspace_pages(request, workspace_id):
     pages = PageImage.objects.filter(workspace=ws).order_by("page_number")
     serializer = PageImageSerializer(pages, many=True)
     return Response(serializer.data)
+
+
+@api_view(["DELETE"])
+@permission_classes([IsAuthenticated])
+def workspace_remove_page(request, workspace_id, page_id):
+    """
+    Remove a page from workspace and delete all associated polygons.
+    This will also clean up associated files (tiles, thumbnails, full JPEGs).
+    """
+    # Ownership check
+    ws = _get_workspace_for_user_or_404(request.user, workspace_id)
+    
+    try:
+        page_obj = PageImage.objects.get(id=page_id, workspace_id=ws.id)
+    except PageImage.DoesNotExist:
+        return Response(
+            {"detail": "Page not found in this workspace."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    
+    try:
+        # Cancel any running tasks for this page
+        if page_obj.task_id:
+            page_obj.cancel_task()
+        
+        # Get page number for file cleanup
+        page_number = page_obj.page_number
+        
+        # Clean up associated files
+        workspace_id = ws.id
+        
+        # Remove tiles directory
+        tiles_dir = os.path.join(settings.MEDIA_ROOT, "tiles", f"workspace_{workspace_id}", f"page_{page_number}")
+        if os.path.exists(tiles_dir):
+            shutil.rmtree(tiles_dir)
+        
+        # Remove full JPEG
+        full_jpeg_path = os.path.join(settings.MEDIA_ROOT, "fullpages", f"workspace_{workspace_id}", f"page_{page_number}.jpg")
+        if os.path.exists(full_jpeg_path):
+            os.remove(full_jpeg_path)
+        
+        # Remove thumbnail
+        thumb_path = os.path.join(settings.MEDIA_ROOT, "thumbnails", f"workspace_{workspace_id}", f"page_{page_number}.jpg")
+        if os.path.exists(thumb_path):
+            os.remove(thumb_path)
+        
+        # Count polygons that will be deleted (for logging)
+        polygon_count = Polygon.objects.filter(page=page_obj).count()
+        
+        # Delete the page (this will cascade delete all polygons due to CASCADE relationship)
+        page_obj.delete()
+        
+        print(f"[✓] Removed page {page_number} and {polygon_count} associated polygons from workspace {workspace_id}")
+        
+        # Send notification about page removal
+        try:
+            from pdfmap_project.events.notifier import workspace_event
+            from pdfmap_project.events.envelope import EventType, JobType
+            
+            workspace_event(
+                event_type=EventType.NOTIFICATION,
+                task_id=str(ws.id),
+                project_id=str(ws.id),
+                user_id=ws.user_id,
+                job_type=JobType.DATA_PROCESSING,
+                payload={
+                    "page_number": page_number,
+                    "polygon_count": polygon_count,
+                    "workspace_id": workspace_id,
+                    "title": f"{ws.name} - Page {page_number} Removed",
+                    "level": "task_completed",
+                },
+                workspace_id=str(ws.id),
+            )
+        except Exception as e:
+            print(f"[!] Failed to send notification for page removal: {e}")
+        
+        return Response(
+            {"detail": f"Page {page_number} and {polygon_count} polygons removed successfully."},
+            status=status.HTTP_200_OK
+        )
+        
+    except Exception as e:
+        print(f"[!] Error removing page {page_id}: {e}")
+        return Response(
+            {"detail": f"Error removing page: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
 
 
 @api_view(["GET", "POST"])
