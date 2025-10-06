@@ -168,8 +168,9 @@ class JobConsumer(BaseWebSocketConsumer):
                     ws=workspace,
                     page_number=page_number,
                     rect_points=rect_points,
+                    page_image=data,
                     segmentation_method=segmentation_method,
-                    dpi=dpi
+                    dpi=dpi,
                 )
                 
                 # Get updated page extract status after processing
