@@ -196,6 +196,10 @@ def generate_tiles_pyramid(image_path: str, base_tile_dir: str, *, max_zoom: int
     _ensure_dir(base_tile_dir)
 
     with Image.open(image_path) as original_img:
+        # Convert to RGB to handle palette mode images
+        if original_img.mode in ('P', 'RGBA', 'LA'):
+            original_img = original_img.convert("RGB")
+        
         original_width, original_height = original_img.size
 
         for z in range(max_zoom + 1):
@@ -665,7 +669,7 @@ def process_page_region(
 def process_single_image_page(ws: Workspace, page_image: PageImage):
     """
     Process a single image page for polygon extraction.
-    Image processing (tiles, thumbnails, JPEG) is already done during upload.
+    This function handles both image processing (tiles, thumbnails, JPEG) and polygon extraction.
     
     Args:
         ws: Workspace instance
@@ -690,6 +694,41 @@ def process_single_image_page(ws: Workspace, page_image: PageImage):
         
         if not os.path.exists(full_jpeg_path):
             raise FileNotFoundError(f"Image file not found: {full_jpeg_path}")
+        
+        # --- Generate tiles, full JPEG, and thumbnail ---
+        tiles_root = _media_path("tiles", f"workspace_{ws.id}")
+        full_root = _media_path("fullpages", f"workspace_{ws.id}")
+        thumbs_root = _media_path("thumbnails", f"workspace_{ws.id}")
+        _ensure_dir(tiles_root)
+        _ensure_dir(full_root)
+        _ensure_dir(thumbs_root)
+
+        # Generate tiles pyramid
+        page_tile_dir = os.path.join(tiles_root, f"page_{page_image.page_number}")
+        generate_tiles_pyramid(
+            image_path=full_jpeg_path,
+            base_tile_dir=page_tile_dir,
+            max_zoom=6,
+        )
+
+        # Generate full JPEG
+        full_img_path = os.path.join(full_root, f"page_{page_image.page_number}.jpg")
+        with Image.open(full_jpeg_path) as full_img:
+            # Convert to RGB to handle palette mode images
+            if full_img.mode in ('P', 'RGBA', 'LA'):
+                full_img = full_img.convert("RGB")
+            full_img.save(full_img_path, "JPEG", quality=90)
+
+        # Generate thumbnail
+        thumb_path = os.path.join(thumbs_root, f"page_{page_image.page_number}.jpg")
+        with Image.open(full_jpeg_path) as img:
+            # Convert to RGB to handle palette mode images
+            if img.mode in ('P', 'RGBA', 'LA'):
+                img = img.convert("RGB")
+            img.thumbnail((256, 256), Image.LANCZOS)
+            img.save(thumb_path, "JPEG", quality=85)
+        
+        print(f"[✓] Generated tiles, full JPEG, and thumbnail for page {page_image.page_number}")
         
         raw_api_url = getattr(settings, "DTI_API_URL", None)
         api_url = urllib.parse.unquote(raw_api_url) if raw_api_url else None

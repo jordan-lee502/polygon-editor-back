@@ -10,6 +10,11 @@ urlpatterns = [
         name="workspace_pages",
     ),
     path(
+        "workspaces/<int:workspace_id>/pages/<int:page_id>/",
+        views.workspace_remove_page,
+        name="workspace_remove_page",
+    ),
+    path(
         "workspaces/<int:workspace_id>/polygons/",
         views.workspace_polygons,
         name="workspace_polygons",
@@ -75,4 +80,6 @@ urlpatterns = [
     path("workspaces/<int:workspace_id>/pages/add/", views.add_page_to_workspace, name="add-page-to-workspace"),
     path("uploads/", include("uploads.urls")),
     path("segmentation-methods/get-methods/", views.fetch_segmentation_methods, name="fetch-segmentation-methods"),
+
+    
 ]
