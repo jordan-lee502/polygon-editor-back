@@ -519,6 +519,7 @@ def process_page_region(
     ws: Workspace,
     page_number: int,
     rect_points: List[Dict[str, int]],
+    page_image: PageImage,
     segmentation_method: str = "GENERIC",
     dpi: int = 100,
 ) -> None:
@@ -532,40 +533,13 @@ def process_page_region(
       {"x": 10, "y": 150}
     ]
     """
-    page_image = None
-    
-    try:
-        pdf_doc = fitz.open(ws.uploaded_pdf.path)
-        page = pdf_doc[page_number - 1]
-    except Exception as e:
-        try:
-            page_image = ws.pages.get(page_number=page_number)
-            page_event(
-                event_type=EventType.TASK_FAILED,
-                task_id=str(ws.id),
-                project_id=str(ws.id),
-                user_id=ws.user_id,
-                job_type=JobType.POLYGON_EXTRACTION,
-                page_id=page_image.id,
-                page_number=page_number,
-                workspace_id=str(ws.id),
-                payload={
-                    "extract_status": page_image.extract_status,
-                },
-            )
-        except Exception:
-            pass
+    full_img_path = getattr(page_image.image, "path", None)
+    if not full_img_path or not os.path.exists(full_img_path):
+        print(f"[!] Page image not found: {full_img_path}")
         return
 
-    scale = dpi / 100.0
-    pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
-
-    page_image, _ = PageImage.objects.update_or_create(
-        workspace=ws,
-        page_number=page_number,
-        defaults={"extract_status": ExtractStatus.QUEUED},
-    )
-    
+    # --- Status: QUEUED ---
+    PageImage.objects.filter(id=page_image.id).update(extract_status=ExtractStatus.QUEUED)
     page_event(
         event_type=EventType.TASK_STARTED,
         task_id=str(ws.id),
@@ -575,12 +549,8 @@ def process_page_region(
         page_id=page_image.id,
         page_number=page_number,
         workspace_id=str(ws.id),
-        payload={
-            "extract_status": page_image.extract_status,
-        },
+        payload={"extract_status": ExtractStatus.QUEUED},
     )
-
-    full_img_path = page_image.image
 
     xs = [pt["x"] for pt in rect_points]
     ys = [pt["y"] for pt in rect_points]

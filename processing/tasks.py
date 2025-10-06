@@ -265,7 +265,9 @@ def simple_page_process_task(
         )
 
         # 3) Call the actual processing function
-        process_page_region(workspace, page_image.page_number, rect_points, segmentation_method, dpi)
+        process_page_region(workspace, page_image.page_number, rect_points, page_image, segmentation_method, dpi)
+
+        sync_workspace_tree_tto_task.delay(workspace_id=workspace.id)
 
         # 4) Update status to finished atomically
         with transaction.atomic():
@@ -274,7 +276,6 @@ def simple_page_process_task(
             page_image.save()
 
         # 5) Kick off TTO sync for this page
-        sync_updated_pages_and_polygons_tto_task.delay(workspace_id=workspace_id, page_id=page_id)
 
         if verbose:
             print(f"Page processing completed successfully")
