@@ -10,6 +10,8 @@ from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
+import inspect
+
 
 # Your pipeline code & enums
 from processing.pdf_processor import (
@@ -343,15 +345,10 @@ def add_page_to_workspace_task(self, workspace_id: int, file_path: str, page_num
         user_id: ID of the user making the request
         page_id: ID of the already-created page (optional for backward compatibility)
     """
-    log.info(f"Starting add_page_to_workspace_task: workspace_id={workspace_id}, file_path={file_path}, page_number={page_number}, auto_process={auto_process}, user_id={user_id}")
     try:
         # Debug: Print the function signature we're about to call
-        import inspect
-        log.info(f"workspace_event function signature: {inspect.signature(workspace_event)}")
         # Get workspace and verify ownership
-        log.info(f"Looking for workspace {workspace_id} with user_id {user_id}")
         workspace = Workspace.objects.get(id=workspace_id, user_id=user_id)
-        log.info(f"Found workspace: {workspace.name}")
         
         # Get the existing page
         if page_id:
@@ -369,7 +366,6 @@ def add_page_to_workspace_task(self, workspace_id: int, file_path: str, page_num
             raise FileNotFoundError(f"File not found: {file_path}")
         
         # Send notification that page was created
-        log.info(f"About to call workspace_event with: event_type={EventType.NOTIFICATION}, task_id={str(page.id)}, project_id={str(workspace_id)}, user_id={user_id}")
         try:
             workspace_event(
                 event_type=EventType.NOTIFICATION,
@@ -386,16 +382,13 @@ def add_page_to_workspace_task(self, workspace_id: int, file_path: str, page_num
                 },
                 workspace_id=str(workspace_id),
             )
-            log.info("workspace_event call successful")
         except Exception as e:
-            log.error(f"workspace_event call failed: {e}")
-            log.error(f"Function signature: {inspect.signature(workspace_event)}")
             raise
         
+        process_single_image_page(workspace, page, auto_extract_on_upload=auto_process)
+
+
         if auto_process:
-            # Call process_single_image_page which handles image processing (tiles, thumbnails, JPEG) and polygon extraction
-            process_single_image_page(workspace, page)
-            
             workspace_event(
                 event_type=EventType.TASK_STARTED,
                 task_id=str(page.id),
@@ -416,9 +409,7 @@ def add_page_to_workspace_task(self, workspace_id: int, file_path: str, page_num
         
     except Workspace.DoesNotExist:
         error_msg = f"Workspace {workspace_id} not found or access denied"
-        log.error(error_msg)
         raise self.retry(exc=Exception(error_msg), countdown=60)
         
     except Exception as exc:
-        log.error(f"Failed to add page to workspace {workspace_id}: {exc}")
         raise self.retry(exc=exc, countdown=60)

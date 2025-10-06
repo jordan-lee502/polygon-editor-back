@@ -298,7 +298,7 @@ def generate_tiles_pyramid(image_path: str, base_tile_dir: str, *, max_zoom: int
 
     except Exception as e:
         print(f"[✗] generate_tiles_pyramid failed for {image_path}: {e}")
-        
+
 # ----------------------------- main processing -----------------------------
 
 def process_workspace(
@@ -710,7 +710,7 @@ def process_page_region(
         print(f"Failed to send success notification: {notify_err}")
 
 
-def process_single_image_page(ws: Workspace, page_image: PageImage):
+def process_single_image_page(ws: Workspace, page_image: PageImage, auto_extract_on_upload: bool = False):
     """
     Process a single image page for polygon extraction.
     Handles both image post-processing (tiles, thumbnails, JPEG)
@@ -720,20 +720,19 @@ def process_single_image_page(ws: Workspace, page_image: PageImage):
     """
 
     try:
-        # === Emit "task started" event ===
-        page_event(
-            event_type=EventType.TASK_STARTED,
-            task_id=str(page_image.id),
-            project_id=str(ws.id),
-            user_id=ws.user_id,
-            job_type=JobType.POLYGON_EXTRACTION,
-            page_id=page_image.id,
-            page_number=page_image.page_number,
-            workspace_id=str(ws.id),
-            payload={"extract_status": page_image.extract_status},
-        )
+        if auto_extract_on_upload:
+            page_event(
+                event_type=EventType.TASK_STARTED,
+                task_id=str(page_image.id),
+                project_id=str(ws.id),
+                user_id=ws.user_id,
+                job_type=JobType.POLYGON_EXTRACTION,
+                page_id=page_image.id,
+                page_number=page_image.page_number,
+                workspace_id=str(ws.id),
+                payload={"extract_status": page_image.extract_status},
+            )
 
-        # === Resolve actual image path (support .png fallback) ===
         full_jpeg_path = page_image.image.path
         if not os.path.exists(full_jpeg_path):
             base, ext = os.path.splitext(full_jpeg_path)
@@ -744,7 +743,6 @@ def process_single_image_page(ws: Workspace, page_image: PageImage):
             else:
                 raise FileNotFoundError(f"Image file not found: {full_jpeg_path}")
 
-        # === Ensure workspace media directories ===
         tiles_root = _media_path("tiles", f"workspace_{ws.id}")
         full_root = _media_path("fullpages", f"workspace_{ws.id}")
         thumbs_root = _media_path("thumbnails", f"workspace_{ws.id}")
@@ -752,7 +750,6 @@ def process_single_image_page(ws: Workspace, page_image: PageImage):
         _ensure_dir(full_root)
         _ensure_dir(thumbs_root)
 
-        # === Generate tiles pyramid ===
         page_tile_dir = os.path.join(tiles_root, f"page_{page_image.page_number}")
         generate_tiles_pyramid(
             image_path=full_jpeg_path,
@@ -760,17 +757,14 @@ def process_single_image_page(ws: Workspace, page_image: PageImage):
             max_zoom=6,
         )
 
-        # === Always produce .jpg copies for frontend ===
         full_img_path = os.path.join(full_root, f"page_{page_image.page_number}.jpg")
         thumb_path = os.path.join(thumbs_root, f"page_{page_image.page_number}.jpg")
 
-        # Full-page JPEG
         with Image.open(full_jpeg_path) as full_img:
             if full_img.mode in ("P", "RGBA", "LA"):
                 full_img = full_img.convert("RGB")
             full_img.save(full_img_path, "JPEG", quality=90)
 
-        # Thumbnail JPEG
         with Image.open(full_jpeg_path) as thumb_img:
             if thumb_img.mode in ("P", "RGBA", "LA"):
                 thumb_img = thumb_img.convert("RGB")
@@ -778,63 +772,76 @@ def process_single_image_page(ws: Workspace, page_image: PageImage):
             thumb_img.save(thumb_path, "JPEG", quality=85)
 
 
-        # === Prepare external API request ===
         raw_api_url = getattr(settings, "DTI_API_URL", None)
         api_url = urllib.parse.unquote(raw_api_url) if raw_api_url else None
         api_key = getattr(settings, "DTI_API_KEY", None)
         api_headers = {"accept": "application/json"}
         if api_key:
             api_headers["x-api-key"] = api_key
+        
+        if auto_extract_on_upload:
+            if api_url:
+                page_image.extract_status = ExtractStatus.PROCESSING
+                page_image.save()
+                _emit_progress_job(ws, EventType.TASK_PROGRESS, page_image, page_image.page_number, ExtractStatus.PROCESSING)
 
-        # === Polygon extraction ===
-        if api_url:
-            page_image.extract_status = ExtractStatus.PROCESSING
-            page_image.save()
-            _emit_progress_job(ws, EventType.TASK_PROGRESS, page_image, page_image.page_number, ExtractStatus.PROCESSING)
-
-            try:
-                with open(full_jpeg_path, "rb") as f:
-                    resp = requests.post(
-                        url=f"{api_url}/process-image/?segmentation_method=GENERIC&debug=false",
-                        headers=api_headers,
-                        files={"file": ("page.jpg", f, "image/jpeg")},
-                        timeout=60,
-                    )
-
-                if resp.status_code == 200:
-                    result = resp.json()
-                    patterns = result.get("polygons", {}).get("patterns", []) or []
-                    created = 0
-
-                    for pattern in patterns:
-                        raw_vertices = pattern.get("vertices", [])
-                        vertices = raw_vertices[0] if (len(raw_vertices) == 1 and isinstance(raw_vertices[0], list)) else raw_vertices
-
-                        Polygon.objects.create(
-                            workspace=ws,
-                            page=page_image,
-                            polygon_id=pattern.get("polygon_id"),
-                            total_vertices=pattern.get("total_vertices"),
-                            vertices=vertices,
+                try:
+                    with open(full_jpeg_path, "rb") as f:
+                        resp = requests.post(
+                            url=f"{api_url}/process-image/?segmentation_method=GENERIC&debug=false",
+                            headers=api_headers,
+                            files={"file": ("page.jpg", f, "image/jpeg")},
+                            timeout=60,
                         )
-                        created += 1
 
-                    print(f"[✓] Page {page_image.page_number}: stored {created} polygons.")
-                    page_image.extract_status = ExtractStatus.FINISHED
-                    _emit_progress_job(ws, EventType.TASK_COMPLETED, page_image, page_image.page_number, ExtractStatus.FINISHED)
+                    if resp.status_code == 200:
+                        result = resp.json()
+                        patterns = result.get("polygons", {}).get("patterns", []) or []
+                        created = 0
 
-                    try:
-                        send_notification_to_job_group(
-                            job_id=str(page_image.id),
-                            project_id=str(ws.id),
-                            title=f"{ws.name} - Page {page_image.page_number} Analysis Complete",
-                            level="success",
-                        )
-                    except Exception as notify_err:
-                        print(f"⚠️ Failed to send success notification: {notify_err}")
+                        for pattern in patterns:
+                            raw_vertices = pattern.get("vertices", [])
+                            vertices = raw_vertices[0] if (len(raw_vertices) == 1 and isinstance(raw_vertices[0], list)) else raw_vertices
 
-                else:
-                    print(f"[✗] API error page {page_image.page_number}: {resp.status_code} - {resp.text[:200]}")
+                            Polygon.objects.create(
+                                workspace=ws,
+                                page=page_image,
+                                polygon_id=pattern.get("polygon_id"),
+                                total_vertices=pattern.get("total_vertices"),
+                                vertices=vertices,
+                            )
+                            created += 1
+
+                        page_image.extract_status = ExtractStatus.FINISHED
+                        _emit_progress_job(ws, EventType.TASK_COMPLETED, page_image, page_image.page_number, ExtractStatus.FINISHED)
+
+                        try:
+                            send_notification_to_job_group(
+                                job_id=str(page_image.id),
+                                project_id=str(ws.id),
+                                title=f"{ws.name} - Page {page_image.page_number} Analysis Complete",
+                                level="success",
+                            )
+                        except Exception as notify_err:
+                            print(f"⚠️ Failed to send success notification: {notify_err}")
+
+                    else:
+                        print(f"[✗] API error page {page_image.page_number}: {resp.status_code} - {resp.text[:200]}")
+                        page_image.extract_status = ExtractStatus.FAILED
+                        _emit_progress_job(ws, EventType.TASK_FAILED, page_image, page_image.page_number, ExtractStatus.FAILED)
+
+                        try:
+                            send_notification_to_job_group(
+                                job_id=str(page_image.id),
+                                project_id=str(ws.id),
+                                title=f"{ws.name} - Page {page_image.page_number} Analysis Failed",
+                                level="error",
+                            )
+                        except Exception as notify_err:
+                            print(f"⚠️ Failed to send failure notification: {notify_err}")
+
+                except Exception as api_err:
+                    print(f"[!] API request failed for page {page_image.page_number}: {api_err}")
                     page_image.extract_status = ExtractStatus.FAILED
                     _emit_progress_job(ws, EventType.TASK_FAILED, page_image, page_image.page_number, ExtractStatus.FAILED)
 
@@ -848,24 +855,9 @@ def process_single_image_page(ws: Workspace, page_image: PageImage):
                     except Exception as notify_err:
                         print(f"⚠️ Failed to send failure notification: {notify_err}")
 
-            except Exception as api_err:
-                print(f"[!] API request failed for page {page_image.page_number}: {api_err}")
-                page_image.extract_status = ExtractStatus.FAILED
-                _emit_progress_job(ws, EventType.TASK_FAILED, page_image, page_image.page_number, ExtractStatus.FAILED)
-
-                try:
-                    send_notification_to_job_group(
-                        job_id=str(page_image.id),
-                        project_id=str(ws.id),
-                        title=f"{ws.name} - Page {page_image.page_number} Analysis Failed",
-                        level="error",
-                    )
-                except Exception as notify_err:
-                    print(f"⚠️ Failed to send failure notification: {notify_err}")
-
-        else:
-            page_image.extract_status = ExtractStatus.FINISHED
-            _emit_progress_job(ws, EventType.TASK_COMPLETED, page_image, page_image.page_number, ExtractStatus.FINISHED)
+            else:
+                page_image.extract_status = ExtractStatus.FINISHED
+                _emit_progress_job(ws, EventType.TASK_COMPLETED, page_image, page_image.page_number, ExtractStatus.FINISHED)
 
         page_image.save()
 
