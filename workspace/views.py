@@ -462,8 +462,6 @@ def workspace_page_polygons(request, workspace_id, page_id):
             payload: [ {id?, polygon_id, vertices: [...]}, ... ]
             NOTE: 'page' is NOT required here; the URL scopes it.
     """
-
-    # 1) Ownership / scope checks
     ws = _get_workspace_for_user_or_404(request.user, workspace_id)
     try:
         page_obj = PageImage.objects.get(id=page_id, workspace_id=ws.id)
@@ -474,9 +472,10 @@ def workspace_page_polygons(request, workspace_id, page_id):
         )
 
     if request.method == "GET":
-        polys = Polygon.objects.filter(
-            workspace_id=ws.id, page_id=page_obj.id
-        ).select_related("page")
+        polys = (
+            Polygon.objects.filter(workspace_id=ws.id, page_id=page_obj.id)
+            .select_related("page")
+        )
         return Response(PolygonSerializer(polys, many=True).data)
 
     # POST: bulk upsert + delete for *this page only*
@@ -488,80 +487,75 @@ def workspace_page_polygons(request, workspace_id, page_id):
         )
 
     existing_qs = Polygon.objects.filter(workspace_id=ws.id, page_id=page_obj.id)
-    existing_ids = set(existing_qs.values_list("id", flat=True))
-    incoming_ids = {item.get("id") for item in data if item.get("id")}
-
-    # Map for updates
-    update_lookup = {item["id"]: item for item in data if item.get("id")}
+    existing_by_id = {p.id: p for p in existing_qs}
+    existing_ids = set(existing_by_id.keys())
 
     to_update = []
     to_create = []
+    matched_ids = set()  # ids we actually updated (present on this page)
     errors = []
     now = timezone.now()
 
     with transaction.atomic():
-        # --- Updates (only those on this page)
-        for poly in existing_qs:
-            if poly.id in incoming_ids:
-                incoming = update_lookup[poly.id]
-                verts = incoming.get("vertices")
-                if not isinstance(verts, (list, tuple)):
-                    return Response(
-                        {"detail": f"Invalid or missing 'vertices' for id {poly.id}."},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
-                poly.polygon_id = incoming.get("polygon_id", poly.polygon_id)
-                poly.vertices = verts
-                poly.total_vertices = len(verts)
-                poly.visible = incoming.get("visible", poly.visible)
-                poly.updated_at = now
-                to_update.append(poly)
-
-        if to_update:
-            Polygon.objects.bulk_update(
-                to_update, ["polygon_id", "vertices", "total_vertices", "updated_at", "visible"]
-            )
-
-        # --- Creates (new polygons for this page)
+        # Single pass: decide update vs create per incoming item
         for item in data:
-            if item.get("id"):
-                continue
             verts = item.get("vertices")
             if not isinstance(verts, (list, tuple)):
-                errors.append("Invalid or missing 'vertices' for a new polygon.")
+                errors.append("Invalid or missing 'vertices' on one of the items.")
                 continue
-            p = Polygon(
-                workspace_id=ws.id,
-                page=page_obj,
-                polygon_id=item.get("polygon_id"),
-                vertices=verts,
-                total_vertices=len(verts),
-                visible=item.get("visible", True),
-            )
-            p.updated_at = now
-            to_create.append(p)
 
-        if to_create:
-            Polygon.objects.bulk_create(to_create)
+            incoming_id = item.get("id")
+
+            if incoming_id and incoming_id in existing_by_id:
+                # UPDATE path (id belongs to this page)
+                poly = existing_by_id[incoming_id]
+                poly.polygon_id = item.get("polygon_id", poly.polygon_id)
+                poly.vertices = verts
+                poly.total_vertices = len(verts)
+                poly.visible = item.get("visible", poly.visible)
+                poly.updated_at = now
+                to_update.append(poly)
+                matched_ids.add(poly.id)
+            else:
+                # CREATE path (either no id, or id not found on this page)
+                # NOTE: we intentionally do NOT set the PK from client 'id'
+                p = Polygon(
+                    workspace_id=ws.id,
+                    page=page_obj,
+                    polygon_id=item.get("polygon_id"),
+                    vertices=verts,
+                    total_vertices=len(verts),
+                    visible=item.get("visible", True),
+                )
+                p.updated_at = now
+                to_create.append(p)
 
         if errors:
             return Response({"detail": errors}, status=status.HTTP_400_BAD_REQUEST)
 
-        # --- Deletes (polygons on this page not present in payload)
-        ids_to_delete = existing_ids - incoming_ids
+        if to_update:
+            Polygon.objects.bulk_update(
+                to_update,
+                ["polygon_id", "vertices", "total_vertices", "updated_at", "visible"],
+            )
+
+        if to_create:
+            Polygon.objects.bulk_create(to_create)
+
+        # DELETE polygons on this page that were not sent back for update
+        # (i.e., existing ids minus those matched/updated this round)
+        ids_to_delete = existing_ids - matched_ids
         if ids_to_delete:
             Polygon.objects.filter(
                 id__in=ids_to_delete, workspace_id=ws.id, page_id=page_obj.id
             ).delete()
 
-    # Return fresh list for the page
     final_polys = Polygon.objects.filter(workspace_id=ws.id, page_id=page_obj.id)
     sync_workspace_tree_tto_task.delay(workspace_id=ws.id)
 
     return Response(
         PolygonSerializer(final_polys, many=True).data, status=status.HTTP_200_OK
     )
-
 
 @api_view(["PATCH"])
 @permission_classes([IsAuthenticated])
