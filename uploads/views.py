@@ -13,7 +13,7 @@ from rest_framework.decorators import api_view, parser_classes
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
 
-from processing.pdf_processor import _media_path, _ensure_dir, generate_tiles_pyramid
+from processing.pdf_processor import _ensure_dir
 
 # === Constants ===
 ALLOWED_EXTS = {".pdf", ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif"} 

@@ -525,7 +525,7 @@ def process_page_region(
 ) -> None:
     """
     Process a single page with polygon extraction limited to a rectangular region.
-    rect_points must be 4 points like:
+    Rect points example:
     [
       {"x": 10, "y": 20},
       {"x": 200, "y": 20},
@@ -533,121 +533,127 @@ def process_page_region(
       {"x": 10, "y": 150}
     ]
     """
-    full_img_path = getattr(page_image.image, "path", None)
-    if not full_img_path or not os.path.exists(full_img_path):
-        print(f"[!] Page image not found: {full_img_path}")
-        return
+    try:
+        full_img_path = getattr(page_image.image, "path", None)
+        if not full_img_path or not os.path.exists(full_img_path):
+            print(f"[!] Page image not found: {full_img_path}")
+            return
 
-    # --- Status: QUEUED ---
-    PageImage.objects.filter(id=page_image.id).update(extract_status=ExtractStatus.QUEUED)
-    page_event(
-        event_type=EventType.TASK_STARTED,
-        task_id=str(ws.id),
-        project_id=str(ws.id),
-        user_id=ws.user_id,
-        job_type=JobType.POLYGON_EXTRACTION,
-        page_id=page_image.id,
-        page_number=page_number,
-        workspace_id=str(ws.id),
-        payload={"extract_status": ExtractStatus.QUEUED},
-    )
+        # --- Mark as QUEUED and emit event ---
+        PageImage.objects.filter(id=page_image.id).update(extract_status=ExtractStatus.QUEUED)
+        page_event(
+            event_type=EventType.TASK_STARTED,
+            task_id=str(page_image.id),
+            project_id=str(ws.id),
+            user_id=ws.user_id,
+            job_type=JobType.POLYGON_EXTRACTION,
+            page_id=page_image.id,
+            page_number=page_number,
+            workspace_id=str(ws.id),
+            payload={"extract_status": ExtractStatus.QUEUED},
+        )
 
-    xs = [pt["x"] for pt in rect_points]
-    ys = [pt["y"] for pt in rect_points]
-    x1, y1, x2, y2 = min(xs), min(ys), max(xs), max(ys)
+        xs = [pt["x"] for pt in rect_points]
+        ys = [pt["y"] for pt in rect_points]
+        x1, y1, x2, y2 = min(xs), min(ys), max(xs), max(ys)
+        analyze_region = {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
 
-    with Image.open(full_img_path) as im:
-        region = im.crop((x1, y1, x2, y2))
+        # --- Crop region safely ---
         cropped_dir = _media_path("cropped", f"workspace_{ws.id}")
         _ensure_dir(cropped_dir)
         cropped_path = os.path.join(cropped_dir, f"page_{page_number}_region.jpg")
-        region.save(cropped_path, "JPEG", quality=90)
 
-    analyze_region = {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
+        with Image.open(full_img_path) as im:
+            im.load()  # ✅ Force-load to avoid palette issues
+            if im.mode in ("P", "RGBA", "LA", "CMYK"):
+                im = im.convert("RGB")
+            region = im.crop((x1, y1, x2, y2))
+            region.save(cropped_path, "JPEG", quality=90)
 
-    raw_api_url = getattr(settings, "DTI_API_URL", None)
-    api_url = urllib.parse.unquote(raw_api_url) if raw_api_url else None
-    api_key = getattr(settings, "DTI_API_KEY", None)
-    api_headers = {"accept": "application/json"}
-    if api_key:
-        api_headers["x-api-key"] = api_key
+        # --- Update to PROCESSING and emit progress ---
+        PageImage.objects.filter(id=page_image.id).update(extract_status=ExtractStatus.PROCESSING)
+        _emit_progress_job(ws, EventType.TASK_PROGRESS, page_image, page_number, ExtractStatus.PROCESSING)
 
-    PageImage.objects.filter(id=page_image.id).update(extract_status=ExtractStatus.PROCESSING)
-    
-    # Send processing progress event
-    _emit_progress_job(ws, EventType.TASK_PROGRESS, page_image, page_number, ExtractStatus.PROCESSING)
+        # --- Prepare API ---
+        raw_api_url = getattr(settings, "DTI_API_URL", None)
+        api_url = urllib.parse.unquote(raw_api_url) if raw_api_url else None
+        api_key = getattr(settings, "DTI_API_KEY", None)
+        api_headers = {"accept": "application/json"}
+        if api_key:
+            api_headers["x-api-key"] = api_key
 
-
-    # Ensure segmentation method is uppercase for DTI API
-    dti_segmentation_method = segmentation_method.upper()
-    
-    try:
-        
-        with open(cropped_path, "rb") as f:
-            resp = requests.post(
-                url=f"{api_url}/process-image/?segmentation_method={dti_segmentation_method}&debug=false",
-                headers=api_headers,
-                files={"file": ("region.jpg", f, "image/jpeg")},
-                timeout=60,
-            )
-            print(f"[!] API response: {resp.status_code} - {resp.text[:200]}")
-
-        if resp.status_code == 200:
-            result = resp.json()
-            patterns = result.get("polygons", {}).get("patterns", []) or []
-
-            adjusted_patterns = []
-            for pattern in patterns:
-                vertices = pattern.get("vertices", [])
-
-                if vertices and isinstance(vertices[0], list):
-                    if all(isinstance(v, list) and len(v) == 2 for v in vertices[0]):
-                        vertices = vertices[0]
-
-                adjusted_vertices = []
-                for vertex in vertices:
-                    if isinstance(vertex, list) and len(vertex) == 2:
-                        x, y = vertex
-                        adjusted_vertices.append([x + x1, y + y1])
-                    elif isinstance(vertex, dict) and "x" in vertex and "y" in vertex:
-                        adjusted_vertices.append([vertex["x"] + x1, vertex["y"] + y1])
-                    else:
-                        continue
-
-                adjusted_pattern = {
-                    "polygon_id": pattern.get("polygon_id"),
-                    "total_vertices": len(adjusted_vertices),
-                    "vertices": adjusted_vertices,
-                }
-                adjusted_patterns.append(adjusted_pattern)
-
-            for pattern in adjusted_patterns:
-                Polygon.objects.create(
-                    workspace=ws,
-                    page=page_image,
-                    polygon_id=pattern.get("polygon_id"),
-                    total_vertices=pattern.get("total_vertices"),
-                    vertices=pattern.get("vertices"),
+        # --- Send cropped region to API ---
+        if api_url:
+            dti_segmentation_method = segmentation_method.upper()
+            with open(cropped_path, "rb") as f:
+                resp = requests.post(
+                    url=f"{api_url}/process-image/?segmentation_method={dti_segmentation_method}&debug=false",
+                    headers=api_headers,
+                    files={"file": ("region.jpg", f, "image/jpeg")},
+                    timeout=60,
                 )
+                print(f"[!] API response: {resp.status_code} - {resp.text[:200]}")
+
+            if resp.status_code == 200:
+                result = resp.json()
+                patterns = result.get("polygons", {}).get("patterns", []) or []
+
+                for pattern in patterns:
+                    vertices = pattern.get("vertices", [])
+                    if vertices and isinstance(vertices[0], list):
+                        if all(isinstance(v, list) and len(v) == 2 for v in vertices[0]):
+                            vertices = vertices[0]
+
+                    adjusted_vertices = []
+                    for vertex in vertices:
+                        if isinstance(vertex, list) and len(vertex) == 2:
+                            x, y = vertex
+                            adjusted_vertices.append([x + x1, y + y1])
+                        elif isinstance(vertex, dict) and "x" in vertex and "y" in vertex:
+                            adjusted_vertices.append([vertex["x"] + x1, vertex["y"] + y1])
+
+                    Polygon.objects.create(
+                        workspace=ws,
+                        page=page_image,
+                        polygon_id=pattern.get("polygon_id"),
+                        total_vertices=len(adjusted_vertices),
+                        vertices=adjusted_vertices,
+                    )
+
+                PageImage.objects.filter(id=page_image.id).update(
+                    extract_status=ExtractStatus.FINISHED,
+                    segmentation_choice=SegmentationChoice.GENERIC,
+                    dpi=dpi,
+                    analyze_region=analyze_region,
+                )
+                _emit_progress_job(ws, EventType.TASK_COMPLETED, page_image, page_number, ExtractStatus.FINISHED)
+
+                try:
+                    send_notification_to_job_group(
+                        job_id=str(page_image.id),
+                        project_id=str(ws.id),
+                        title=f"{ws.name} - Page {page_image.page_number} Analysis Complete",
+                        level="success",
+                    )
+                except Exception as notify_err:
+                    print(f"⚠️ Failed to send success notification: {notify_err}")
+            else:
+                raise Exception(f"API error {resp.status_code}: {resp.text[:200]}")
         else:
-            PageImage.objects.filter(id=page_image.id).update(extract_status=ExtractStatus.FAILED)
-            _emit_progress_job(ws, EventType.TASK_FAILED, page_image, page_number, ExtractStatus.FAILED)
-            
-            try:
-                send_notification_to_job_group(
-                    job_id=str(page_image.id),
-                    project_id=str(ws.id),
-                    title=f"{ws.name} - Page {page_image.page_number} Analysis Failed",
-                    level="error",
-                )
-            except Exception as notify_err:
-                print(f"Failed to send failure notification: {notify_err}")
-            return
+            PageImage.objects.filter(id=page_image.id).update(
+                extract_status=ExtractStatus.FINISHED,
+                segmentation_choice=SegmentationChoice.GENERIC,
+                dpi=dpi,
+                analyze_region=analyze_region,
+            )
+            _emit_progress_job(ws, EventType.TASK_COMPLETED, page_image, page_number, ExtractStatus.FINISHED)
 
-    except Exception as api_err:
+        print(f"[✓] Page region processing complete for workspace {ws.id}, page {page_number}")
+
+    except Exception as e:
+        print(f"[✗] Page processing failed: {e}")
         PageImage.objects.filter(id=page_image.id).update(extract_status=ExtractStatus.FAILED)
         _emit_progress_job(ws, EventType.TASK_FAILED, page_image, page_number, ExtractStatus.FAILED)
-        
         try:
             send_notification_to_job_group(
                 job_id=str(page_image.id),
@@ -656,28 +662,7 @@ def process_page_region(
                 level="error",
             )
         except Exception as notify_err:
-            print(f"Failed to send failure notification: {notify_err}")
-        return
-
-    # Update PageImage for the page
-    PageImage.objects.filter(id=page_image.id).update(
-        extract_status=ExtractStatus.FINISHED,
-        segmentation_choice=SegmentationChoice.GENERIC,
-        dpi=100,
-        analyze_region=analyze_region,
-    )
-    
-    _emit_progress_job(ws, EventType.TASK_COMPLETED, page_image, page_number, ExtractStatus.FINISHED)
-    
-    try:
-        send_notification_to_job_group(
-            job_id=str(page_image.id),
-            project_id=str(ws.id),
-            title=f"{ws.name} - Page {page_image.page_number} Analysis Complete",
-            level="success",
-        )
-    except Exception as notify_err:
-        print(f"Failed to send success notification: {notify_err}")
+            print(f"⚠️ Failed to send failure notification: {notify_err}")
 
 
 def process_single_image_page(ws: Workspace, page_image: PageImage, auto_extract_on_upload: bool = False):

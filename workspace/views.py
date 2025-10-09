@@ -457,98 +457,99 @@ def workspace_polygons(request, workspace_id):
 @permission_classes([IsAuthenticated])
 def workspace_page_polygons(request, workspace_id, page_id):
     """
-    GET  -> list polygons for a single page in a workspace
-    POST -> bulk upsert (+delete missing) polygons for that page
-            payload: [ {id?, polygon_id, vertices: [...]}, ... ]
-            NOTE: 'page' is NOT required here; the URL scopes it.
+    GET  -> list polygons for a page
+    POST -> bulk upsert polygons for that page
+            payload: [ {polygon_id, vertices:[...], visible?}, ... ]
+    Rules:
+      • if polygon_id exists in (workspace,page) -> update
+      • else -> create new polygon
+      • polygons not in payload -> delete
     """
     ws = _get_workspace_for_user_or_404(request.user, workspace_id)
+
     try:
         page_obj = PageImage.objects.get(id=page_id, workspace_id=ws.id)
     except PageImage.DoesNotExist:
-        return Response(
-            {"detail": "Page not found in this workspace."},
-            status=status.HTTP_404_NOT_FOUND,
-        )
+        return Response({"detail": "Page not found in this workspace."}, status=404)
 
+    # === GET ===
     if request.method == "GET":
-        polys = (
-            Polygon.objects.filter(workspace_id=ws.id, page_id=page_obj.id)
-            .select_related("page")
-        )
+        polys = Polygon.objects.filter(workspace_id=ws.id, page_id=page_obj.id)
         return Response(PolygonSerializer(polys, many=True).data)
 
-    # POST: bulk upsert + delete for *this page only*
+    # === POST ===
     data = request.data
     if not isinstance(data, list):
-        return Response(
-            {"detail": "Expected a list of polygons."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+        return Response({"detail": "Expected a list of polygons."}, status=400)
 
-    existing_qs = Polygon.objects.filter(workspace_id=ws.id, page_id=page_obj.id)
-    existing_by_id = {p.id: p for p in existing_qs}
-    existing_ids = set(existing_by_id.keys())
-
-    to_update = []
-    to_create = []
-    matched_ids = set()  # ids we actually updated (present on this page)
-    errors = []
     now = timezone.now()
+    created, updated, deleted, errors = [], [], [], []
+
+    payload_polygon_ids = {item.get("polygon_id") for item in data if item.get("polygon_id")}
 
     with transaction.atomic():
-        # Single pass: decide update vs create per incoming item
         for item in data:
+            polygon_id = item.get("polygon_id")
             verts = item.get("vertices")
+
+            if not polygon_id:
+                errors.append("Missing 'polygon_id' for one of the polygons.")
+                continue
             if not isinstance(verts, (list, tuple)):
-                errors.append("Invalid or missing 'vertices' on one of the items.")
+                errors.append(f"Invalid or missing 'vertices' for polygon {polygon_id}.")
                 continue
 
-            incoming_id = item.get("id")
+            # --- Try to find existing polygons (not just get one) ---
+            existing_polys = list(
+                Polygon.objects.filter(workspace_id=ws.id, page_id=page_id, polygon_id=polygon_id)
+            )
 
-            if incoming_id and incoming_id in existing_by_id:
-                # UPDATE path (id belongs to this page)
-                poly = existing_by_id[incoming_id]
-                poly.polygon_id = item.get("polygon_id", poly.polygon_id)
+            if len(existing_polys) == 1:
+                # ✅ Update existing
+                poly = existing_polys[0]
                 poly.vertices = verts
                 poly.total_vertices = len(verts)
                 poly.visible = item.get("visible", poly.visible)
                 poly.updated_at = now
-                to_update.append(poly)
-                matched_ids.add(poly.id)
+                poly.save(update_fields=["vertices", "total_vertices", "visible", "updated_at"])
+                updated.append(poly.id)
+
+            elif len(existing_polys) > 1:
+                # ⚠️ Data integrity issue — keep first, delete duplicates
+                primary = existing_polys[0]
+                duplicates = existing_polys[1:]
+                Polygon.objects.filter(id__in=[d.id for d in duplicates]).delete()
+
+                primary.vertices = verts
+                primary.total_vertices = len(verts)
+                primary.visible = item.get("visible", primary.visible)
+                primary.updated_at = now
+                primary.save(update_fields=["vertices", "total_vertices", "visible", "updated_at"])
+                updated.append(primary.id)
+
             else:
-                # CREATE path (either no id, or id not found on this page)
-                # NOTE: we intentionally do NOT set the PK from client 'id'
-                p = Polygon(
+                # ➕ Create new
+                new_poly = Polygon.objects.create(
                     workspace_id=ws.id,
                     page=page_obj,
-                    polygon_id=item.get("polygon_id"),
+                    polygon_id=polygon_id,
                     vertices=verts,
                     total_vertices=len(verts),
                     visible=item.get("visible", True),
+                    updated_at=now,
                 )
-                p.updated_at = now
-                to_create.append(p)
+                created.append(new_poly.id)
 
-        if errors:
-            return Response({"detail": errors}, status=status.HTTP_400_BAD_REQUEST)
+        # --- Delete polygons not in payload ---
+        existing_polygons = Polygon.objects.filter(workspace_id=ws.id, page_id=page_obj.id)
+        ids_to_delete = existing_polygons.exclude(polygon_id__in=payload_polygon_ids)
+        if ids_to_delete.exists():
+            deleted_ids = list(ids_to_delete.values_list("id", flat=True))
+            ids_to_delete.delete()
+            deleted.extend(deleted_ids)
 
-        if to_update:
-            Polygon.objects.bulk_update(
-                to_update,
-                ["polygon_id", "vertices", "total_vertices", "updated_at", "visible"],
-            )
-
-        if to_create:
-            Polygon.objects.bulk_create(to_create)
-
-        # DELETE polygons on this page that were not sent back for update
-        # (i.e., existing ids minus those matched/updated this round)
-        ids_to_delete = existing_ids - matched_ids
-        if ids_to_delete:
-            Polygon.objects.filter(
-                id__in=ids_to_delete, workspace_id=ws.id, page_id=page_obj.id
-            ).delete()
+    if errors:
+        return Response({"detail": errors}, status=400)
 
     final_polys = Polygon.objects.filter(workspace_id=ws.id, page_id=page_obj.id)
     sync_workspace_tree_tto_task.delay(workspace_id=ws.id)
